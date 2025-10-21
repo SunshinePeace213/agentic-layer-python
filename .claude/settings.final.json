@@ -1,0 +1,199 @@
+{
+    "permissions": {
+      "deny": [
+        "Bash(echo:*)",
+        "Bash(printf:*)",
+        "Bash(sed:*)",
+        "Bash(awk:*)",
+        "Bash(perl:*)",
+        "Read($PWD/.claude/tdd-guard/**)"
+      ]
+    },
+    "env": {
+      "MAX_THINKING_TOKENS": "31999"
+    },
+    "statusLine": {
+      "type": "command",
+      "command": ".claude/statusline.sh",
+      "padding": 0
+    },
+    "outputStyle": "GenUI",
+    "hooks": {
+      "PreToolUse": [
+        // Part 0: Essential Security Hooking -- Pre-Tool Use
+        {
+          "matcher": "Read|Edit|MultiEdit|Write|Bash",
+          "hooks": [
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/sensitive_file_access_validator.py"
+            },
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/destructive_command_blocker.py"
+            },
+          ]
+        }, 
+        // Part 1: Lint Argument Hooking -- Pre-Tool Use
+        {
+          "matcher": "Bash",
+          "hooks": [
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/lint_argument_enforcer.py"
+            },
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/uv_workflow_enforcer.py"
+            }
+          ]
+        },
+  
+        // Part 2: Code Implementation Hooking -- Pre-Tool Use
+        {
+          "matcher": "Read|Edit|MultiEdit|Write",
+          "hooks": [
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/file_naming_enforcer.py"
+            },
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/tmp_creation_blocker.py"
+            },
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/uv_dependency_blocker.py"
+            },
+  
+          ]
+        },
+        // Part 4: TDD Guard -- Pre-Tool Use
+        {
+          "matcher": "Write|Edit|MultiEdit|TodoWrite|Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "tdd-guard"
+            }
+          ]
+        },
+  
+        // Part 5: Logging -- Pre-Tool Use
+        {
+          "matcher": "",
+          "hooks": [
+            { 
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_tools/pre_tools_logging.py"
+            }
+          ]
+        }
+      ],
+      "PostToolUse": [
+        {
+          "matcher": "*",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/post_tools/formatting_python.py"
+            },
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/post_tools/unified_python_posttools.py"
+            },
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/post_tools/tools_logging.py"
+            }
+          ]
+        },
+        {
+          "matcher": "Write|Edit|MultiEdit|TodoWrite",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/post_tools/duplicate_detection_hook.py"
+            },
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/post_tools/sys_path_manipulation_checking.py"
+            }
+          ]
+        }
+      ],
+      "Notification": [
+        {
+          "matcher": "",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/notification.py --notify"
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "matcher": "",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/stop.py --chat"
+            }
+          ]
+        }
+      ],
+      "SubagentStop": [
+        {
+          "matcher": "",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/subagent_stop.py --notify"
+            }
+          ]
+        }
+      ],
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/user_prompt_submit.py --log-only --store-last-prompt --name-agent"
+            },
+            {
+              "type": "command",
+              "command": "tdd-guard"
+            }
+          ]
+        }
+      ],
+      "PreCompact": [
+        {
+          "matcher": "",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/pre_compact.py"
+            }
+          ]
+        }
+      ],
+      "SessionStart": [
+        {
+          "matcher": "startup|resume|clear",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "uv run .claude/hooks/session_start.py"
+            },
+            {
+              "type": "command",
+              "command": "tdd-guard"
+            }
+          ]
+        }
+      ]
+    }
+  }

@@ -1,0 +1,12 @@
+{
+    "guardEnabled": true,
+    "ignorePatterns": [
+      "*.md",
+      "*.css",
+      "*.json",
+      "*.yml",
+      "**/*.generated.ts",
+      "**/public/**",
+      "*.config.*"
+    ]
+  }

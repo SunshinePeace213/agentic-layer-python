@@ -1,0 +1,35 @@
+{
+    "include": ["src"],
+    "exclude": [
+      "**/node_modules", 
+      "**/__pycache__",
+      "src/experimental",
+      "src/typestubs"
+    ],
+    "pythonVersion": "3.12",
+    "typeCheckingMode": "strict",
+    
+    // Strict typing - no Any types allowed except for subprocess.args
+    "reportAny": "error",
+    "reportExplicitAny": "error",
+    "reportUnknownMemberType": "error",
+    "reportUnknownArgumentType": "error",
+    "reportUnknownVariableType": "error",
+    "reportUnknownLambdaType": "error",
+    "reportUnknownParameterType": "error",
+    "reportMissingImports": "error",
+    
+    // These are acceptable for a hook script
+    "reportDeprecated": "information",
+    "reportMissingTypeStubs": false,
+    "reportUnusedVariable": "warning",
+    "reportUnusedParameter": "warning",
+    "reportUnusedImport": "warning",
+  
+    // String concatenation is fine for formatting
+    "reportImplicitStringConcatenation": false,
+    "failOnWarnings": true,
+
+    // Allow suppressing specific unavoidable Any types with type: ignore
+    "enableTypeIgnoreComments": true
+  }
