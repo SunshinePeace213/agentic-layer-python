@@ -218,6 +218,8 @@ __marimo__/
 .mcp-all.json
 .mcp.json
 
+agents/*
+
 logs/*
 
 models/*

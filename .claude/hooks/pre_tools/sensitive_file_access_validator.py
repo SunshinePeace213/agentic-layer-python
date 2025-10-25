@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """
 Unified Sensitive File Access (Write/Edit) Validation - PreToolUse Hook
 ===========================================
@@ -18,171 +22,67 @@ Exit codes:
     1: Non-blocking error (invalid input, continues execution)
 """
 
-import json
 import re
-import sys
 from pathlib import Path
-from typing import TypedDict, Literal
 
-
-class ToolInput(TypedDict, total=False):
-    """Type definition for tool input parameters."""
-    file_path: str
-    path: str
-    command: str
-    content: str
-
-
-class HookSpecificOutput(TypedDict):
-    """Type definition for hook-specific output."""
-    hookEventName: Literal["PreToolUse"]
-    permissionDecision: Literal["allow", "deny", "ask"]
-    permissionDecisionReason: str
-
-
-class HookOutput(TypedDict, total=False):
-    """Type definition for complete hook output."""
-    hookSpecificOutput: HookSpecificOutput
-    suppressOutput: bool
+# Import shared utilities and types
+try:
+    from .utils.utils import parse_hook_input, output_decision, get_file_path
+    from .utils.data_types import ToolInput
+except ImportError:
+    from utils.utils import parse_hook_input, output_decision, get_file_path
+    from utils.data_types import ToolInput
 
 
 def main() -> None:
     """
     Main entry point for the write validation hook.
-    
+
     Reads hook data from stdin and outputs JSON decision.
     """
-    try:
-        # Read input from stdin
-        input_text = sys.stdin.read()
-        
-        if not input_text:
-            # No input provided - non-blocking error
-            print("Error: No input provided", file=sys.stderr)
-            sys.exit(1)
-        
-        # Parse JSON
-        try:
-            parsed_json = json.loads(input_text)  # type: ignore[reportAny]
-        except json.JSONDecodeError as e:
-            # Invalid JSON - non-blocking error
-            print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-            sys.exit(1)
-        
-        # Validate input structure
-        if not isinstance(parsed_json, dict):
-            # Invalid format - non-blocking error
-            print("Error: Input must be a JSON object", file=sys.stderr)
-            sys.exit(1)
-        
-        # Extract fields with type checking
-        tool_name_obj = parsed_json.get("tool_name", "")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        tool_input_obj = parsed_json.get("tool_input", {})  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        
-        if not isinstance(tool_name_obj, str):
-            # Missing tool_name - allow operation
-            output_decision("allow", "Missing or invalid tool_name")
-            return
-        
-        if not isinstance(tool_input_obj, dict):
-            # Invalid tool_input - allow operation
-            output_decision("allow", "Invalid tool_input format")
-            return
-        
-        tool_name: str = tool_name_obj
-        
-        # Only validate file-related tools
-        file_tools = {"Read", "Edit", "MultiEdit", "Write", "Bash"}
-        
-        if tool_name not in file_tools:
-            # Not a file operation tool - allow
-            output_decision("allow", "Not a file operation tool")
-            return
-        
-        # Create typed tool input
-        typed_tool_input = ToolInput()
-        
-        # Extract relevant fields
-        file_path_val = tool_input_obj.get("file_path")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        if isinstance(file_path_val, str):
-            typed_tool_input["file_path"] = file_path_val
-        
-        path_val = tool_input_obj.get("path")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        if isinstance(path_val, str):
-            typed_tool_input["path"] = path_val
-        
-        command_val = tool_input_obj.get("command")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        if isinstance(command_val, str):
-            typed_tool_input["command"] = command_val
-        
-        # Validate the file operation
-        violation = validate_file_operation(tool_name, typed_tool_input)
-        
-        if violation:
-            # Deny operation with detailed reason
-            output_decision("deny", violation, suppress_output=True)
-        else:
-            # Allow operation
-            output_decision("allow", "File operation is safe")
-            
-    except Exception as e:
-        # Unexpected error - non-blocking
-        print(f"Error: Unexpected error in hook: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Parse input using shared utility
+    parsed = parse_hook_input()
+    if not parsed:
+        return  # Error already handled
 
+    tool_name, tool_input = parsed
 
-def output_decision(
-    decision: Literal["allow", "deny", "ask"],
-    reason: str,
-    suppress_output: bool = False
-) -> None:
-    """
-    Output a properly formatted JSON decision.
-    
-    Args:
-        decision: Permission decision
-        reason: Reason for the decision
-        suppress_output: Whether to suppress output in transcript mode
-    """
-    output: HookOutput = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason
-        }
-    }
-    
-    # Only add suppressOutput if it's True
-    if suppress_output:
-        output["suppressOutput"] = True
-    
-    try:
-        print(json.dumps(output))
-        sys.exit(0)  # Success - JSON output controls permission
-    except (TypeError, ValueError) as e:
-        # Failed to serialize JSON - non-blocking error
-        print(f"Error: Failed to serialize output JSON: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Only validate file-related tools
+    file_tools = {"Read", "Edit", "Write", "Bash"}
+
+    if tool_name not in file_tools:
+        output_decision("allow", "Not a file operation tool")
+        return
+
+    # Validate the file operation
+    violation = validate_file_operation(tool_name, tool_input)
+
+    if violation:
+        # Deny operation with detailed reason
+        output_decision("deny", violation, suppress_output=True)
+    else:
+        # Allow operation
+        output_decision("allow", "File operation is safe")
 
 
 def validate_file_operation(tool_name: str, tool_input: ToolInput) -> str | None:
     """
     Validate file operations for security concerns.
-    
+
     Args:
         tool_name: Name of the tool being invoked
         tool_input: Tool input parameters
-        
+
     Returns:
         Violation message if found, None otherwise
     """
     # Handle file-based tools
     if tool_name in {"Read", "Edit", "MultiEdit", "Write"}:
-        file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
+        file_path = get_file_path(tool_input)
         if file_path:
             # Determine operation type
-            operation = "read" if tool_name in {"Read", "view"} else "write"
-            
+            operation = "Read" if tool_name in {"Read"} else "Write"
+
             # Check for violations
             violation = check_file_path_violations(file_path, operation)
             if violation:
@@ -258,7 +158,7 @@ def check_file_path_violations(file_path: str, operation: str) -> str | None:
             )
     
     # Additional write-only restrictions
-    if operation == "write":
+    if operation == "Write":
         # Block writes to system directories
         system_dirs = [
             '/etc', '/usr', '/bin', '/sbin', '/boot', 

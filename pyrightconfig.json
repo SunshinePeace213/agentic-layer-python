@@ -1,5 +1,5 @@
 {
-    "include": ["src"],
+    "include": ["src", ".claude"],
     "exclude": [
       "**/node_modules", 
       "**/__pycache__",

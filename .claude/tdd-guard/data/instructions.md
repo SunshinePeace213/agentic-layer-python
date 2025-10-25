@@ -66,6 +66,8 @@ The foundation of TDD is the Red-Green-Refactor cycle:
    - Adding implementation without running the test first
    - Refactoring when tests haven't been run or are failing
 
+
+
 ### Critical Principle: Incremental Development
 Each step in TDD should address ONE specific issue:
 - Test fails "not defined" → Create empty stub/class only
