@@ -9,12 +9,19 @@ UV Workflow Enforcer - PreToolUse Hook
 
 Enforces the use of UV for all Python-related commands during development,
 providing educational guidance and command alternatives.
+
+REFACTORED: Uses shared utilities from utils/ to reduce code duplication.
 """
 
-import json
 import re
 import sys
 from typing import Optional, Pattern, Tuple
+
+# Import shared utilities for input parsing and output formatting
+try:
+    from .utils import parse_hook_input, output_decision
+except ImportError:
+    from utils import parse_hook_input, output_decision
 
 # Compiled regex patterns for performance
 PYTHON_INTERPRETER: Pattern[str] = re.compile(r'\b(python3?(\.\d+)?)\s+')
@@ -193,56 +200,30 @@ Learn more: https://docs.astral.sh/uv/"""
 def main() -> None:
     """Main entry point for UV workflow enforcer hook."""
     try:
-        input_text = sys.stdin.read()
-        # JSON parsing inherently returns unknown types - validate at runtime
-        parsed_obj = json.loads(input_text)  # type: ignore[reportUnknownVariableType]
+        # Parse input using shared utility
+        parsed = parse_hook_input()
+        if not parsed:
+            # Error already handled by parse_hook_input
+            output_decision("allow", "Failed to parse input (fail-safe)")
+            return
         
-        if not isinstance(parsed_obj, dict):
-            raise ValueError("Invalid input: expected dict")
-        
-        tool_name_obj: object = parsed_obj.get("tool_name", "")  # type: ignore[reportUnknownMemberType]
-        tool_name = str(tool_name_obj) if isinstance(tool_name_obj, str) else ""
+        tool_name, tool_input = parsed
         
         # Only validate Bash commands
         if tool_name != "Bash":
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "Not a Bash command"
-                }
-            }
-            print(json.dumps(output))
+            output_decision("allow", "Not a Bash command")
             return
         
-        tool_input_obj: object = parsed_obj.get("tool_input", {})  # type: ignore[reportUnknownMemberType]
-        if not isinstance(tool_input_obj, dict):
-            tool_input_obj = {}
-        
-        command_obj: object = tool_input_obj.get("command", "")  # type: ignore[reportUnknownMemberType]
-        command = str(command_obj) if isinstance(command_obj, str) else ""
+        # Extract command from tool input
+        command = tool_input.get("command", "")
         
         if not command:
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "No command to validate"
-                }
-            }
-            print(json.dumps(output))
+            output_decision("allow", "No command to validate")
             return
         
         # Check for fallback cases first
         if is_fallback_case(command):
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "Legitimate UV fallback or system command"
-                }
-            }
-            print(json.dumps(output))
+            output_decision("allow", "Legitimate UV fallback or system command")
             return
         
         # Detect UV violations
@@ -251,36 +232,14 @@ def main() -> None:
         if violation:
             detected_cmd, suggested_cmd, msg_type = violation
             message = generate_educational_message(detected_cmd, suggested_cmd, msg_type)
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": message
-                },
-                "suppressOutput": True
-            }
-            print(json.dumps(output))
+            output_decision("deny", message, suppress_output=True)
         else:
-            output = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "Command follows UV workflow"
-                }
-            }
-            print(json.dumps(output))
+            output_decision("allow", "Command follows UV workflow")
     
     except Exception as e:
         # Fail-safe: allow operation on any error
         print(f"UV workflow enforcer error: {e}", file=sys.stderr)
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": f"Hook error (fail-safe): {e}"
-            }
-        }
-        print(json.dumps(output))
+        output_decision("allow", f"Hook error (fail-safe): {e}")
 
 
 if __name__ == "__main__":
