@@ -1,469 +1,286 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """
-Check UV Violations - PreToolUse Hook
-======================================
-Enforces the use of UV for all Python-related commands.
+UV Workflow Enforcer - PreToolUse Hook
+========================================
 
-This hook ensures that:
-- All python/pip commands are run through uv
-- Modern uv syntax (uv add/remove/sync) is used instead of uv pip syntax
-
-Usage:
-    python check_uv_violations.py
-
-Exit codes:
-    0: Success (JSON output controls permission)
-    1: Non-blocking error (invalid input, continues execution)
+Enforces the use of UV for all Python-related commands during development,
+providing educational guidance and command alternatives.
 """
 
 import json
-import shlex
+import re
 import sys
-from typing import TypedDict, Literal
+from typing import Optional, Pattern, Tuple
+
+# Compiled regex patterns for performance
+PYTHON_INTERPRETER: Pattern[str] = re.compile(r'\b(python3?(\.\d+)?)\s+')
+PIP_COMMAND: Pattern[str] = re.compile(r'\bpip3?\s+(install|uninstall|list|freeze|show)')
+UV_COMMAND: Pattern[str] = re.compile(r'\buv\s+(run|add|remove|sync|lock|pip)')
+SYSTEM_INFO: Pattern[str] = re.compile(r'\b(python3?|pip3?)\s+(--version|-V|--help|-h)\b')
+SHEBANG_CHECK: Pattern[str] = re.compile(r'(head|cat|grep).*python')
+STRING_CONTEXT: Pattern[str] = re.compile(r'(echo|printf|git\s+commit).*["\'].*python.*["\']')
+WHICH_PYTHON: Pattern[str] = re.compile(r'\bwhich\s+python')
 
 
-class ToolInput(TypedDict, total=False):
-    """Type definition for tool input parameters."""
-    command: str
-    file_path: str
-    path: str
+def is_fallback_case(command: str) -> bool:
+    """Check if command is a legitimate fallback case."""
+    return bool(
+        UV_COMMAND.search(command) or
+        SYSTEM_INFO.search(command) or
+        SHEBANG_CHECK.search(command) or
+        STRING_CONTEXT.search(command) or
+        WHICH_PYTHON.search(command)
+    )
 
 
-class HookSpecificOutput(TypedDict):
-    """Type definition for hook-specific output."""
-    hookEventName: Literal["PreToolUse"]
-    permissionDecision: Literal["allow", "deny", "ask"]
-    permissionDecisionReason: str
+def detect_python_command(command: str) -> Optional[Tuple[str, str]]:
+    """Detect Python interpreter invocations and suggest UV."""
+    match = PYTHON_INTERPRETER.search(command)
+    if not match:
+        return None
+    
+    python_cmd = match.group(1)
+    suggestion = command.replace(python_cmd, "uv run", 1)
+    return (command, suggestion)
 
 
-class HookOutput(TypedDict, total=False):
-    """Type definition for complete hook output."""
-    hookSpecificOutput: HookSpecificOutput
-    suppressOutput: bool
+def detect_pip_command(command: str) -> Optional[Tuple[str, str, str]]:
+    """Detect pip commands and suggest UV equivalents."""
+    match = PIP_COMMAND.search(command)
+    if not match:
+        return None
+    
+    subcommand = match.group(1)
+    
+    if subcommand == "install":
+        if "-r requirements.txt" in command or "-r " in command:
+            suggestion = "uv sync"
+            msg_type = "pip_requirements"
+        elif "-e ." in command:
+            suggestion = command.replace("pip", "uv pip", 1)
+            msg_type = "fallback"
+        else:
+            pkg_match = re.search(r'install\s+([a-zA-Z0-9_\-]+)', command)
+            if pkg_match:
+                package = pkg_match.group(1)
+                suggestion = f"uv add {package}"
+            else:
+                suggestion = "uv add <package>"
+            msg_type = "pip_install"
+    
+    elif subcommand == "uninstall":
+        pkg_match = re.search(r'uninstall\s+([a-zA-Z0-9_\-]+)', command)
+        if pkg_match:
+            package = pkg_match.group(1)
+            suggestion = f"uv remove {package}"
+        else:
+            suggestion = "uv remove <package>"
+        msg_type = "pip_install"
+    
+    else:
+        suggestion = command.replace("pip", "uv pip", 1)
+        msg_type = "fallback"
+    
+    return (command, suggestion, msg_type)
+
+
+def detect_uv_violation(command: str) -> Optional[Tuple[str, str, str]]:
+    """Detect UV workflow violations."""
+    pip_result = detect_pip_command(command)
+    if pip_result:
+        detected, suggested, msg_type = pip_result
+        return (detected, suggested, msg_type)
+    
+    python_result = detect_python_command(command)
+    if python_result:
+        detected, suggested = python_result
+        return (detected, suggested, "python")
+    
+    return None
+
+
+def generate_educational_message(detected_cmd: str, suggested_cmd: str, message_type: str) -> str:
+    """Generate educational message with UV alternatives."""
+    display_cmd = detected_cmd if len(detected_cmd) <= 60 else detected_cmd[:57] + "..."
+    
+    if message_type == "python":
+        return f"""🚫 Use UV to run Python scripts
+
+Command detected: {display_cmd}
+UV equivalent:    {suggested_cmd}
+
+Benefits:
+• ✅ Runs in project's virtual environment automatically
+• ✅ Ensures dependencies are installed
+• ✅ Supports inline script metadata
+• ✅ Works with any Python version
+
+Common UV commands:
+  uv run <script>                # Run script
+  uv run --python 3.12 <script>  # Specific Python version
+  uv run python -m <module>      # Run module
+
+Learn more: https://docs.astral.sh/uv/guides/scripts/"""
+    
+    elif message_type == "pip_install":
+        return f"""🚫 Use UV instead of pip for package management
+
+Command detected: {display_cmd}
+UV equivalent:    {suggested_cmd}
+
+Why UV?
+• ⚡ 10-100x faster dependency resolution
+• 🔒 Automatic lock file management
+• 📦 Virtual environment handling built-in
+• 🎯 Works with pyproject.toml (modern Python standard)
+
+Common UV commands:
+  uv add <package>        # Add dependency
+  uv add --dev <package>  # Add dev dependency
+  uv remove <package>     # Remove dependency
+  uv sync                 # Install all dependencies
+  uv lock                 # Update lock file
+
+Learn more: https://docs.astral.sh/uv/"""
+    
+    elif message_type == "pip_requirements":
+        return f"""🚫 Use UV sync instead of pip install -r
+
+Command detected: {display_cmd}
+UV equivalent:    {suggested_cmd}
+
+Why uv sync?
+• 📋 Installs dependencies from pyproject.toml + uv.lock
+• 🔐 Ensures exact versions from lock file
+• 🎯 Creates/updates venv automatically
+• ⚡ Much faster than pip
+
+Migration path:
+1. Convert requirements.txt to pyproject.toml
+2. Or use: uv pip install -r requirements.txt (fallback)
+3. Long-term: Move to pyproject.toml for modern Python packaging
+
+Learn more: https://docs.astral.sh/uv/guides/projects/"""
+    
+    elif message_type == "fallback":
+        return f"""ℹ️ Consider using UV for this operation
+
+Command detected: {display_cmd}
+UV suggestion:    {suggested_cmd}
+
+This operation may work, but UV provides better alternatives.
+The suggested command uses 'uv pip' as a fallback.
+
+Prefer native UV commands when possible:
+  uv add <package>     # Instead of pip install
+  uv remove <package>  # Instead of pip uninstall
+  uv sync              # Instead of pip install -r requirements.txt
+
+Learn more: https://docs.astral.sh/uv/"""
+    
+    return f"""🚫 Use UV for Python workflow
+
+Command detected: {display_cmd}
+UV equivalent:    {suggested_cmd}
+
+Learn more: https://docs.astral.sh/uv/"""
 
 
 def main() -> None:
-    """
-    Main entry point for the UV violations checker.
-    
-    Reads hook data from stdin and outputs JSON decision.
-    """
+    """Main entry point for UV workflow enforcer hook."""
     try:
-        # Read input from stdin
         input_text = sys.stdin.read()
+        # JSON parsing inherently returns unknown types - validate at runtime
+        parsed_obj = json.loads(input_text)  # type: ignore[reportUnknownVariableType]
         
-        if not input_text:
-            # No input provided - non-blocking error
-            print("Error: No input provided", file=sys.stderr)
-            sys.exit(1)
+        if not isinstance(parsed_obj, dict):
+            raise ValueError("Invalid input: expected dict")
         
-        # Parse JSON
-        try:
-            parsed_json = json.loads(input_text)  # type: ignore[reportAny]
-        except json.JSONDecodeError as e:
-            # Invalid JSON - non-blocking error
-            print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-            sys.exit(1)
+        tool_name_obj: object = parsed_obj.get("tool_name", "")  # type: ignore[reportUnknownMemberType]
+        tool_name = str(tool_name_obj) if isinstance(tool_name_obj, str) else ""
         
-        # Validate input structure
-        if not isinstance(parsed_json, dict):
-            # Invalid format - non-blocking error
-            print("Error: Input must be a JSON object", file=sys.stderr)
-            sys.exit(1)
-        
-        # Extract fields with type checking
-        tool_name_obj = parsed_json.get("tool_name", "")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        tool_input_obj = parsed_json.get("tool_input", {})  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        
-        if not isinstance(tool_name_obj, str):
-            # Missing tool_name - allow operation
-            output_decision("allow", "Missing or invalid tool_name")
+        # Only validate Bash commands
+        if tool_name != "Bash":
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Not a Bash command"
+                }
+            }
+            print(json.dumps(output))
             return
         
+        tool_input_obj: object = parsed_obj.get("tool_input", {})  # type: ignore[reportUnknownMemberType]
         if not isinstance(tool_input_obj, dict):
-            # Invalid tool_input - allow operation
-            output_decision("allow", "Invalid tool_input format")
-            return
+            tool_input_obj = {}
         
-        tool_name: str = tool_name_obj
+        command_obj: object = tool_input_obj.get("command", "")  # type: ignore[reportUnknownMemberType]
+        command = str(command_obj) if isinstance(command_obj, str) else ""
         
-        # Only check bash/shell commands
-        if tool_name not in {"Bash"}:
-            # Not a command tool - allow
-            output_decision("allow", "Not a command execution tool")
-            return
-        
-        # Extract command from tool_input
-        command_val = tool_input_obj.get("command")  # type: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        if not isinstance(command_val, str):
-            # No command - allow
-            output_decision("allow", "No command to validate")
-            return
-        
-        command = command_val.strip()
         if not command:
-            # Empty command - allow
-            output_decision("allow", "Empty command")
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "No command to validate"
+                }
+            }
+            print(json.dumps(output))
             return
         
-        # Validate UV usage
-        violation = validate_uv_usage(command)
+        # Check for fallback cases first
+        if is_fallback_case(command):
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Legitimate UV fallback or system command"
+                }
+            }
+            print(json.dumps(output))
+            return
+        
+        # Detect UV violations
+        violation = detect_uv_violation(command)
         
         if violation:
-            # Deny operation with detailed reason
-            output_decision("deny", violation, suppress_output=True)
+            detected_cmd, suggested_cmd, msg_type = violation
+            message = generate_educational_message(detected_cmd, suggested_cmd, msg_type)
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": message
+                },
+                "suppressOutput": True
+            }
+            print(json.dumps(output))
         else:
-            # Allow operation
-            output_decision("allow", "Command follows UV usage guidelines")
-            
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Command follows UV workflow"
+                }
+            }
+            print(json.dumps(output))
+    
     except Exception as e:
-        # Unexpected error - non-blocking
-        print(f"Error: Unexpected error in hook: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def output_decision(
-    decision: Literal["allow", "deny", "ask"],
-    reason: str,
-    suppress_output: bool = False
-) -> None:
-    """
-    Output a properly formatted JSON decision.
-    
-    Args:
-        decision: Permission decision
-        reason: Reason for the decision
-        suppress_output: Whether to suppress output in transcript mode
-    """
-    output: HookOutput = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason
+        # Fail-safe: allow operation on any error
+        print(f"UV workflow enforcer error: {e}", file=sys.stderr)
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": f"Hook error (fail-safe): {e}"
+            }
         }
-    }
-    
-    # Only add suppressOutput if it's True
-    if suppress_output:
-        output["suppressOutput"] = True
-    
-    try:
         print(json.dumps(output))
-        sys.exit(0)  # Success - JSON output controls permission
-    except (TypeError, ValueError) as e:
-        # Failed to serialize JSON - non-blocking error
-        print(f"Error: Failed to serialize output JSON: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def validate_uv_usage(command: str) -> str | None:
-    """
-    Validate that Python commands are using UV properly.
-    
-    Args:
-        command: The command string to validate
-        
-    Returns:
-        Violation message if found, None otherwise
-    """
-    # Parse the command
-    try:
-        cmd_parts = shlex.split(command)
-        if not cmd_parts:
-            return None
-    except ValueError:
-        # Invalid shell command syntax - allow it (shell will error)
-        return None
-    
-    # Check for violations in order of priority
-    
-    # 1. Check for direct Python invocation
-    python_violation = check_python_invocation(cmd_parts, command)
-    if python_violation:
-        return python_violation
-    
-    # 2. Check for direct pip invocation
-    pip_violation = check_pip_invocation(cmd_parts, command)
-    if pip_violation:
-        return pip_violation
-    
-    # 3. Check for legacy uv pip syntax
-    uv_pip_violation = check_uv_pip_syntax(cmd_parts, command)
-    if uv_pip_violation:
-        return uv_pip_violation
-    
-    return None
-
-
-def check_python_invocation(cmd_parts: list[str], original_command: str) -> str | None:
-    """
-    Check for direct Python invocation without UV.
-    
-    Args:
-        cmd_parts: Parsed command parts
-        original_command: Original command string
-        
-    Returns:
-        Violation message if found, None otherwise
-    """
-    if not cmd_parts:
-        return None
-    
-    first_part = cmd_parts[0]
-    
-    # Check for python/python3 commands
-    if first_part in {"python", "python3"} or first_part.endswith("/python") or first_part.endswith("/python3"):
-        suggested = suggest_python_fix(cmd_parts)
-        
-        # Truncate long commands for display
-        display_cmd = original_command if len(original_command) <= 50 else original_command[:47] + "..."
-        
-        return (
-            f"🚫 Direct Python invocation detected. \n"
-            f"Command: {display_cmd}. \n"
-            f"Use 'uv run' for consistent environment management. \n"
-            f"Suggested: {suggested}. \n"
-            f"UV ensures proper dependency isolation and version consistency."
-        )
-    
-    return None
-
-
-def check_pip_invocation(cmd_parts: list[str], original_command: str) -> str | None:
-    """
-    Check for direct pip invocation without UV.
-    
-    Args:
-        cmd_parts: Parsed command parts
-        original_command: Original command string
-        
-    Returns:
-        Violation message if found, None otherwise
-    """
-    if not cmd_parts:
-        return None
-    
-    first_part = cmd_parts[0]
-    
-    # Check for pip/pip3 commands
-    if first_part in {"pip", "pip3"} or first_part.endswith("/pip") or first_part.endswith("/pip3"):
-        suggested = suggest_pip_fix(cmd_parts)
-        
-        # Truncate long commands for display
-        display_cmd = original_command if len(original_command) <= 50 else original_command[:47] + "..."
-        
-        return (
-            f"🚫 Direct pip invocation detected. \n"
-            f"Command: {display_cmd}. \n"
-            f"Use UV commands for better performance and consistency. \n"
-            f"Suggested: {suggested}. \n"
-            f"UV is 10-100x faster than pip and handles conflicts better."
-        )
-    
-    # Check for python -m pip pattern
-    if len(cmd_parts) >= 3:
-        if cmd_parts[0] in {"python", "python3"} and cmd_parts[1] == "-m" and cmd_parts[2] in {"pip", "pip3"}:
-            suggested = suggest_pip_fix(cmd_parts[2:])
-            
-            # Truncate long commands
-            display_cmd = original_command if len(original_command) <= 50 else original_command[:47] + "..."
-            
-            return (
-                f"🚫 'python -m pip' pattern detected.\n"
-                f"Command: {display_cmd}. \n"
-                f"Use UV commands instead of python -m pip. \n"
-                f"Suggested: {suggested}. \n"
-                f"UV provides faster, more reliable package management."
-            )
-    
-    return None
-
-
-def check_uv_pip_syntax(cmd_parts: list[str], original_command: str) -> str | None:
-    """
-    Check for legacy 'uv pip' syntax that should use modern UV commands.
-    
-    Args:
-        cmd_parts: Parsed command parts
-        original_command: Original command string
-        
-    Returns:
-        Violation message if found, None otherwise
-    """
-    # Check for uv pip pattern
-    if len(cmd_parts) >= 2:
-        if cmd_parts[0] == "uv" and cmd_parts[1] == "pip":
-            if len(cmd_parts) >= 3:
-                subcommand = cmd_parts[2]
-                
-                # Check if this is a command that has a modern equivalent
-                if subcommand in {"install", "uninstall"}:
-                    suggested = suggest_modern_uv_syntax(cmd_parts)
-                    
-                    # Truncate long commands
-                    display_cmd = original_command if len(original_command) <= 50 else original_command[:47] + "..."
-                    
-                    return (
-                        f"⚠️ Legacy 'uv pip' syntax detected. \n"
-                        f"Command: {display_cmd}. \n"
-                        f"Use modern UV syntax (uv add/remove) for cleaner workflow. \n"
-                        f"Suggested: {suggested}. \n"
-                        f"Modern UV commands integrate better with pyproject.toml. \n"
-                    )
-    
-    return None
-
-
-def suggest_python_fix(cmd_parts: list[str]) -> str:
-    """
-    Suggest UV-based fix for Python invocation.
-
-    Args:
-        cmd_parts: Parsed command parts
-
-    Returns:
-        Suggested command(s) - primary and fallback
-    """
-    # Primary suggestion: Replace python/python3 with uv run, skipping the python command itself
-    suggested_new_parts = ["uv", "run"] + cmd_parts[1:]
-
-    # Fallback suggestion: Keep python in the command
-    suggested_new_parts_with_python: list[str] = ["uv", "run"] + cmd_parts
-
-    # Format primary suggestion
-    suggestion = shlex.join(suggested_new_parts)
-    if len(suggestion) > 60:
-        suggestion = suggestion[:57] + "..."
-
-    # Format fallback suggestion
-    fallback = shlex.join(suggested_new_parts_with_python)
-    if len(fallback) > 60:
-        fallback = fallback[:57] + "..."
-
-    # Return both suggestions
-    return f"{suggestion} (or try: {fallback})"
-
-
-def suggest_pip_fix(cmd_parts: list[str]) -> str:
-    """
-    Suggest UV-based fix for pip commands.
-    
-    Args:
-        cmd_parts: Parsed command parts (starting with pip)
-        
-    Returns:
-        Suggested command
-    """
-    if len(cmd_parts) < 2:
-        return "uv add <package>"
-    
-    # Find the pip subcommand
-    pip_index = 0
-    for i, part in enumerate(cmd_parts):
-        if part in {"pip", "pip3"}:
-            pip_index = i
-            break
-    
-    if pip_index + 1 >= len(cmd_parts):
-        return "uv add <package>"
-    
-    subcommand = cmd_parts[pip_index + 1]
-    remaining_args = cmd_parts[pip_index + 2:] if pip_index + 2 < len(cmd_parts) else []
-    
-    # Map pip commands to uv equivalents
-    if subcommand == "install":
-        packages: list[str] = []
-        
-        for i, arg in enumerate(remaining_args):
-            if arg in {"-r", "--requirement"}:
-                if i + 1 < len(remaining_args):
-                    return "uv sync"
-                continue
-            elif arg in {"-e", "--editable"}:
-                if i + 1 < len(remaining_args):
-                    path = remaining_args[i + 1]
-                    return f"uv add --editable {path}"
-                continue
-            elif not arg.startswith("-"):
-                packages.append(arg)
-        
-        if packages:
-            return f"uv add {' '.join(packages[:3])}"  # Limit to 3 packages
-        else:
-            return "uv sync"
-            
-    elif subcommand == "uninstall":
-        packages = [arg for arg in remaining_args if not arg.startswith("-")][:3]
-        if packages:
-            return f"uv remove {' '.join(packages)}"
-        else:
-            return "uv remove <package>"
-            
-    elif subcommand == "freeze":
-        return "uv export --no-hashes"
-        
-    elif subcommand == "list":
-        return "uv pip list"
-        
-    else:
-        return f"uv {subcommand}"
-
-
-def suggest_modern_uv_syntax(cmd_parts: list[str]) -> str:
-    """
-    Suggest modern UV syntax for legacy uv pip commands.
-    
-    Args:
-        cmd_parts: Parsed command parts (starting with 'uv')
-        
-    Returns:
-        Suggested command
-    """
-    if len(cmd_parts) < 3:
-        return "uv add <package>"
-    
-    subcommand = cmd_parts[2]
-    remaining_args = cmd_parts[3:] if len(cmd_parts) > 3 else []
-    
-    if subcommand == "install":
-        packages: list[str] = []
-        editable = False
-        dev = False
-        
-        for i, arg in enumerate(remaining_args):
-            if arg in {"-r", "--requirement"}:
-                return "uv sync"
-            elif arg in {"-e", "--editable"}:
-                editable = True
-                if i + 1 < len(remaining_args):
-                    packages.append(remaining_args[i + 1])
-                continue
-            elif arg == "--dev":
-                dev = True
-                continue
-            elif not arg.startswith("-"):
-                packages.append(arg)
-        
-        if packages:
-            cmd = "uv add"
-            if dev:
-                cmd += " --dev"
-            if editable:
-                cmd += " --editable"
-            packages_str = ' '.join(packages[:3])  # Limit to 3 packages
-            return f"{cmd} {packages_str}"
-        else:
-            return "uv sync"
-            
-    elif subcommand == "uninstall":
-        packages = [arg for arg in remaining_args if not arg.startswith("-")][:3]
-        if packages:
-            return f"uv remove {' '.join(packages)}"
-        else:
-            return "uv remove <package>"
-    
-    else:
-        return shlex.join(cmd_parts)
 
 
 if __name__ == "__main__":
