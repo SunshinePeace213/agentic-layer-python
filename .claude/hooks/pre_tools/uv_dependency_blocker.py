@@ -147,7 +147,7 @@ def main() -> None:
     tool_name, tool_input = parsed
 
     # Only validate file edit tools
-    if tool_name not in {"Write", "Edit", "MultiEdit"}:
+    if tool_name not in {"Write", "Edit"}:
         output_decision("allow", "Not a file edit tool")
         return
 

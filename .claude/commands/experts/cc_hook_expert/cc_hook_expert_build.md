@@ -72,7 +72,7 @@ agents/                              # Hook output data
 ### Hook Architecture in Our Codebase
 
 **File Structure Standards:**
-- `.claude/hooks/*.py` - All hook implementations live here as UV scripts
+- `.claude/hooks/<category>/*.py` - All hook implementations live here as UV scripts
 - `.claude/settings.json` - Project-wide hook configurations (committed to git)
 - `.claude/settings.local.json` - Local overrides for individual developers (gitignored)
 - `specs/*-hook-spec.md` - Detailed specifications for hook features
@@ -176,188 +176,6 @@ agents/                              # Hook output data
 - Non-blocking pattern: catch all exceptions and exit(0) for logging hooks
 - Minimal stderr output to avoid noise in Claude operations
 
-### Shared Utilities Implementation Pattern
-
-When multiple hooks within a category share common boilerplate (input parsing, output formatting, validation):
-
-**1. Create Shared Modules Structure:**
-```
-.claude/hooks/<category>/
-├── utils/
-│   ├── __init__.py          # Public API exports
-│   ├── data_types.py        # TypedDict definitions
-│   └── utils.py             # Shared functions
-├── tests/
-│   ├── test_data_types.py   # Type tests
-│   ├── test_utils.py        # Function tests
-│   └── test_integration.py  # Hook tests
-└── <hook-name>.py           # Individual hooks
-```
-
-**2. Implement data_types.py:**
-```python
-#!/usr/bin/env python3
-"""Centralized TypedDict definitions for <category> hooks."""
-
-from typing import TypedDict, Literal
-
-class ToolInput(TypedDict, total=False):
-    """Input parameters from Claude Code tools.
-
-    Uses total=False to allow partial dictionaries since different
-    tools provide different sets of parameters.
-    """
-    file_path: str
-    content: str
-    command: str
-
-class HookSpecificOutput(TypedDict):
-    """Hook-specific output structure."""
-    hookEventName: Literal["PreToolUse"]  # Adjust per hook type
-    permissionDecision: Literal["allow", "deny", "ask"]
-    permissionDecisionReason: str
-
-class HookOutput(TypedDict, total=False):
-    """Complete output structure."""
-    hookSpecificOutput: HookSpecificOutput
-    suppressOutput: bool
-```
-
-**3. Implement utils.py:**
-```python
-#!/usr/bin/env python3
-"""Shared utility functions for <category> hooks."""
-
-import json
-import sys
-from typing import Optional, Tuple
-
-try:
-    from .data_types import ToolInput, HookOutput
-except ImportError:
-    from data_types import ToolInput, HookOutput
-
-def parse_hook_input() -> Optional[Tuple[str, ToolInput]]:
-    """Parse and validate hook input from stdin.
-
-    Returns:
-        Tuple of (tool_name, tool_input) if successful
-        None if error occurred (error already handled)
-    """
-    input_text = sys.stdin.read()
-    parsed_json = json.loads(input_text)
-
-    tool_name = parsed_json.get("tool_name", "")
-    tool_input_obj = parsed_json.get("tool_input", {})
-
-    # Build typed input
-    typed_tool_input = ToolInput()
-    if "file_path" in tool_input_obj:
-        typed_tool_input["file_path"] = tool_input_obj["file_path"]
-
-    return (tool_name, typed_tool_input)
-
-def output_decision(decision: str, reason: str,
-                   suppress_output: bool = False) -> None:
-    """Output formatted JSON decision and exit."""
-    output: HookOutput = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason
-        }
-    }
-
-    if suppress_output:
-        output["suppressOutput"] = True
-
-    print(json.dumps(output))
-    sys.exit(0)
-
-def get_file_path(tool_input: ToolInput) -> str:
-    """Extract file path from tool input."""
-    return tool_input.get("file_path", "")
-```
-
-**4. Implement __init__.py:**
-```python
-"""Public API for <category> shared utilities."""
-
-from .data_types import ToolInput, HookOutput
-from .utils import parse_hook_input, output_decision, get_file_path
-
-__all__ = [
-    "ToolInput",
-    "HookOutput",
-    "parse_hook_input",
-    "output_decision",
-    "get_file_path",
-]
-```
-
-**5. Update Individual Hooks to Use Shared Utilities:**
-```python
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
-"""Hook implementation using shared utilities."""
-
-# Import with fallback pattern
-try:
-    from .utils import parse_hook_input, output_decision
-    from .data_types import ToolInput
-except ImportError:
-    from utils import parse_hook_input, output_decision
-    from data_types import ToolInput
-
-def main() -> None:
-    """Main entry point."""
-    # Use shared parsing
-    parsed = parse_hook_input()
-    if not parsed:
-        return  # Error already handled
-
-    tool_name, tool_input = parsed
-
-    # Focus on business logic only
-    violation = validate_operation(tool_name, tool_input)
-
-    if violation:
-        output_decision("deny", violation, suppress_output=True)
-    else:
-        output_decision("allow", "Operation is safe")
-
-def validate_operation(tool_name: str, tool_input: ToolInput) -> str | None:
-    """Business logic - the only unique code per hook."""
-    # Hook-specific validation logic here
-    return None
-
-if __name__ == "__main__":
-    main()
-```
-
-**Benefits of This Pattern:**
-- **Code Reduction**: 30-35% fewer lines per hook (proven in pre_tools refactoring)
-- **Consistency**: All hooks use identical input/output patterns
-- **Maintainability**: Bug fixes in one place benefit all hooks
-- **Type Safety**: Centralized TypedDict definitions
-- **Testing**: Shared utilities tested once, reused everywhere
-
-**When to Use:**
-- 3+ hooks in same category share similar boilerplate
-- Input parsing or output formatting is duplicated
-- TypedDict definitions are copy-pasted across files
-
-**Implementation Steps:**
-1. Write tests for shared utilities FIRST (TDD approach)
-2. Implement data_types.py and utils.py
-3. Test shared modules independently
-4. Refactor one hook as pilot implementation
-5. Verify behavioral equivalence with integration tests
-6. Refactor remaining hooks once pattern is proven
-
 ## Workflow
 
 1. **Establish Expertise**
@@ -374,6 +192,7 @@ if __name__ == "__main__":
    - Check .claude/settings.json for current configurations
    - Review .claude/settings.local.json if present
    - Examine .claude/hooks/*.py for patterns and conventions
+   - Inspect .claude/hooks/<hooks_category>/utils for shared utilities
    - Note integration points and dependencies
 
 4. **Execute Plan-Driven Implementation**
@@ -429,7 +248,8 @@ if __name__ == "__main__":
    
    **Testing Protocol:**
    - Create test JSON matching expected schemas
-   - Test via: `echo '<test-json>' | uv run .claude/hooks/<hook>.py`
+   - Start Test via pytest framework by code
+   - Another test via: `echo '<test-json>' | uv run .claude/hooks/<hook>.py`
    - Verify all exit codes and outputs
    - Test edge cases and error conditions
    - Validate Claude Code integration
@@ -439,7 +259,7 @@ if __name__ == "__main__":
    - Ruff Checking (python testing library via UV)
    - basedpyright (python testing library via UV), config file is pyrightconfig.json
    - vulture (python testing library via UV)
-
+   
 8. **Verify Integration**
    - Test hook triggers in actual Claude Code sessions
    - Confirm matchers work as expected
@@ -456,8 +276,7 @@ if __name__ == "__main__":
    - Known limitations
    - Troubleshooting guide
    - Example usage scenarios
-
-
+   
 ## Report
 
 Concise implementation summary:

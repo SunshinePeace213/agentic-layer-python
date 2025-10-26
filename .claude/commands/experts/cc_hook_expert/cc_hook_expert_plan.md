@@ -96,45 +96,11 @@ agents/                              # Hook output data
 - Directory structure for output: `agents/<feature>/<session_id>/<data>.jsonl`
 - JSONL format enables streaming and append-only operations
 
-**Shared Utilities Pattern (Code Reuse Across Hooks):**
-When multiple hooks in the same category share common logic:
-- Create `utils/` subdirectory within the hook category (e.g., `.claude/hooks/pre_tools/utils/`)
-- Extract TypedDict definitions to `data_types.py` for type consistency
-- Extract common functions to `utils.py` (parsing, output, validation helpers)
-- Export public API through `__init__.py` for clean imports
-- Benefits: 30-35% code reduction per hook, centralized bug fixes, faster development
-- Pattern proven in pre_tools/ refactoring: reduced sensitive_file_access_validator.py from 385 to 250 lines
-
-**Code Reuse Implementation Standards:**
-```python
-# In utils/data_types.py - Centralized types
-class ToolInput(TypedDict, total=False):
-    file_path: str
-    content: str
-
-# In utils/utils.py - Shared functions
-def parse_hook_input() -> Optional[Tuple[str, ToolInput]]:
-    # Reusable input parsing logic
-    pass
-
-def output_decision(decision: str, reason: str) -> None:
-    # Reusable JSON output formatting
-    pass
-
-# In individual hooks - Clean, focused code
-from .utils import parse_hook_input, output_decision
-
-def main():
-    parsed = parse_hook_input()
-    if not parsed:
-        return
-    # Focus on business logic only
-```
-
 **Testing Infrastructure Standards:**
 - Create `tests/` directory within hook category
 - Use pytest with `uv run pytest path/to/tests/`
-- Test coverage: unit tests for utilities, integration tests for hooks
+- Distributed Testing with `uv run pytest -n auto path/to/tests/`
+- Test coverage with `uv run pytest --cov=path/to/tests/`
 - Write tests BEFORE refactoring to ensure behavioral equivalence
 
 ### Planning Standards
@@ -176,6 +142,7 @@ The planning should be following the Test-Driven Development from expertise duri
    - Review .claude/settings.local.json if present (local overrides)
    - Inspect .claude/hooks/*.py for existing hook implementations
    - Identify patterns and conventions used in current hooks
+   - Inspect .claude/hooks/<hooks_category>/utils for shared utilities
 
 3. **Apply Hook Architecture Knowledge**
    - Review the expertise section for hook architecture patterns
@@ -208,7 +175,7 @@ The planning should be following the Test-Driven Development from expertise duri
    - Dependencies (Python packages via UV)
    - Error handling and edge cases
    - Testing scenarios (Python library pytest via UV)
-   - Integration with existing hooks 
+   - Integration with existing hooks
 
 7. **Document Implementation Plan**
    - Step-by-step implementation guide
