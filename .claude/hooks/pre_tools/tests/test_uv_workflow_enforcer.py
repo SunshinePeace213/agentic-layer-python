@@ -10,13 +10,14 @@ Validates detection of python/pip commands and UV alternatives.
 import json
 import subprocess
 from pathlib import Path
+from typing import cast
 
 
 # Get the hook script path
 HOOK_SCRIPT = Path(__file__).parent.parent / "uv_workflow_enforcer.py"
 
 
-def run_hook(tool_name: str, command: str) -> dict:
+def run_hook(tool_name: str, command: str) -> dict[str, object]:
     """
     Run the hook with test input and return parsed output.
 
@@ -43,38 +44,42 @@ def run_hook(tool_name: str, command: str) -> dict:
         text=True
     )
 
-    return json.loads(result.stdout)
+    return cast(dict[str, object], json.loads(result.stdout))
 
 
 def test_uv_run_command_is_allowed():
     """UV run commands should be allowed without warnings."""
     output = run_hook("Bash", "uv run script.py")
-    assert output["hookSpecificOutput"]["permissionDecision"] == "allow", \
+    hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+    assert hook_specific["permissionDecision"] == "allow", \
         "UV run command should be allowed"
 
 
 def test_python_script_execution_is_blocked():
     """Python script execution should be blocked with UV suggestion."""
     output = run_hook("Bash", "python script.py")
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny", \
+    hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+    assert hook_specific["permissionDecision"] == "deny", \
         "Python script execution should be denied"
-    assert "uv run" in output["hookSpecificOutput"]["permissionDecisionReason"], \
+    assert "uv run" in str(hook_specific["permissionDecisionReason"]), \
         "Should suggest uv run"
 
 
 def test_pip_install_is_blocked():
     """Pip install should be blocked with uv add suggestion."""
     output = run_hook("Bash", "pip install requests")
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny", \
+    hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+    assert hook_specific["permissionDecision"] == "deny", \
         "Pip install should be denied"
-    assert "uv add" in output["hookSpecificOutput"]["permissionDecisionReason"], \
+    assert "uv add" in str(hook_specific["permissionDecisionReason"]), \
         "Should suggest uv add"
 
 
 def test_python_version_is_allowed():
     """Python --version should be allowed as system info command."""
     output = run_hook("Bash", "python --version")
-    assert output["hookSpecificOutput"]["permissionDecision"] == "allow", \
+    hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+    assert hook_specific["permissionDecision"] == "allow", \
         "Python --version should be allowed"
 
 

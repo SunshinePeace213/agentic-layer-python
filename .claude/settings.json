@@ -67,6 +67,15 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/uv-workflow-enforcer.py"
           }
         ]
+      },
+      {
+        "matcher": "Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/tmp_creation_blocker.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [

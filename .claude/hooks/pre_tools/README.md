@@ -330,27 +330,53 @@ Suggested alternatives:
 
 **File**: `tmp_creation_blocker.py`
 
-**Purpose**: Prevents creation of temporary files in the project directory.
+**Purpose**: Prevents file creation in system temporary directories for better observability.
+
+**Why**: System temp directories clutter your system and make debugging harder. All project files should live in the project directory for better tracking, version control, and observability.
 
 **Blocks**:
-- Files in `/tmp/project/`
-- Files with `temp_`, `tmp_` prefixes
-- `.tmp` extensions
+- `/tmp/*` - Standard Unix/Linux temp
+- `/var/tmp/*` - Variable temp directory
+- `/private/tmp/*` - macOS-specific temp
+- `/dev/shm/*` - Shared memory temp
+- `/run/shm/*` - Alternative shared memory temp
 
 **Allows**:
-- System `/tmp/` directory
-- Documented temporary directories
+- Project-local directories (e.g., `./temp/`, `./cache/`)
+- Any path outside system temp directories
+
+**Tools Monitored**:
+- `Write` - Direct file creation
+- `NotebookEdit` - Jupyter notebook files
+- `Bash` - Shell commands (future enhancement)
+
+**Example Blocked Operation**:
+```
+🚫 Blocked file creation in system temp directory.
+Path: /tmp/debug.log
+Policy: Never create files in system temp paths for better observability.
+Alternative: Use project directory instead:
+  - Create: /Users/ringo/Desktop/claude-setup-python/temp/debug.log
+  - Then add 'temp/' to .gitignore if needed
+```
 
 **Configuration**:
 ```json
 {
-  "matcher": "Write",
+  "matcher": "Write|NotebookEdit|Bash",
   "hooks": [{
     "type": "command",
     "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/tmp_creation_blocker.py"
   }]
 }
 ```
+
+**Testing**:
+```bash
+uv run pytest .claude/hooks/pre_tools/tests/test_tmp_creation_blocker.py -v
+```
+
+**Specification**: `specs/experts/cc_hook_expert/tmp-creation-blocker-spec.md`
 
 ---
 

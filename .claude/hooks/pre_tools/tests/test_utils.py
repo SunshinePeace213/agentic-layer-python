@@ -15,6 +15,7 @@ import json
 import sys
 from io import StringIO
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 import pytest
 
@@ -53,9 +54,10 @@ def test_output_decision_allow():
             output_decision("allow", "Test reason")
         assert exc_info.value.code == 0
 
-        output = json.loads(mock_stdout.getvalue())
-        assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
-        assert output["hookSpecificOutput"]["permissionDecisionReason"] == "Test reason"
+        output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+        hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+        assert hook_specific["permissionDecision"] == "allow"
+        assert hook_specific["permissionDecisionReason"] == "Test reason"
         assert "suppressOutput" not in output
 
 
@@ -66,8 +68,9 @@ def test_output_decision_with_suppress_output():
             output_decision("deny", "Test reason", suppress_output=True)
         assert exc_info.value.code == 0
 
-        output = json.loads(mock_stdout.getvalue())
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+        hook_specific = cast(dict[str, object], output["hookSpecificOutput"])
+        assert hook_specific["permissionDecision"] == "deny"
         assert output["suppressOutput"] is True
 
 

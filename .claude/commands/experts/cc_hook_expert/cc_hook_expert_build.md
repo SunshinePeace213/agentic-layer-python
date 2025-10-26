@@ -33,6 +33,7 @@ PATH_TO_SPEC: $ARGUMENTS
 │   ├── context_bundle_builder.py    # Example existing hook
 │   ├── universal_hook_logger.py     # Universal logging hook
 │   ├── pre_tools/                   # Category of pre tools hook
+│   │   ├── README.md                # Comprehensive category documentation
 │   │   ├── utils/                   # Shared utilities for pre_tools hooks
 │   │   │   ├── __init__.py          # Public API exports
 │   │   │   ├── data_types.py        # Centralized TypedDict definitions
@@ -76,6 +77,39 @@ agents/                              # Hook output data
 - `.claude/settings.json` - Project-wide hook configurations (committed to git)
 - `.claude/settings.local.json` - Local overrides for individual developers (gitignored)
 - `specs/*-hook-spec.md` - Detailed specifications for hook features
+- `.claude/hooks/<category>/README.md` - Comprehensive reference documentation for hook categories
+
+**Documentation Standards for Hook Categories:**
+
+When a hook category (e.g., pre_tools/, post_tools/) contains multiple related hooks and shared utilities, create a comprehensive README.md within that category directory:
+
+**README.md Contents:**
+1. **Overview** - Purpose and key features of the hook category
+2. **Architecture** - Directory structure, execution flow, design patterns
+3. **Available Hooks** - Detailed documentation for each hook including:
+   - Purpose and functionality
+   - What it blocks/allows
+   - Configuration examples
+   - Example output
+4. **Shared Utilities** - Documentation of utils/ modules (data_types, utils functions)
+5. **Adding New Hooks** - Step-by-step TDD guide for implementing new hooks in the category
+6. **Testing** - How to run tests, test structure, coverage
+7. **Configuration** - Settings file structure, matcher patterns, local overrides
+8. **Troubleshooting** - Common issues, debugging steps, error resolution
+9. **Best Practices** - Development guidelines, security standards, performance tips
+10. **Appendix** - Environment variables, exit codes, related documentation
+
+**When to Create Category README.md:**
+- Category contains 3+ hooks with shared patterns
+- Shared utilities (utils/) exist in the category
+- Testing infrastructure is established
+- Category represents a cohesive functional area (e.g., all PreToolUse hooks)
+
+**Benefits:**
+- Comprehensive reference for all hooks in one place
+- Onboarding guide for adding new hooks to the category
+- Complements specs/ documentation with practical implementation guidance
+- Reduces knowledge silos and improves maintainability
 
 **Execution Model:**
 - All hooks execute via: `uv run $CLAUDE_PROJECT_DIR/.claude/hooks/<hook-name>.py`
@@ -449,12 +483,30 @@ if __name__ == "__main__":
    
 9. **Document Implementation**
    Create or update documentation:
+
+   **For Individual Hooks:**
    - Hook purpose and triggers
    - Configuration requirements
    - Expected inputs and outputs
    - Known limitations
    - Troubleshooting guide
    - Example usage scenarios
+
+   **For Hook Categories (when applicable):**
+   Create/update `.claude/hooks/<category>/README.md` when:
+   - Category has 3+ hooks with shared patterns
+   - Shared utilities exist (utils/ directory)
+   - Testing infrastructure is established
+
+   Include in Category README.md:
+   - Overview and architecture
+   - All hooks in category (purpose, blocks/allows, configuration, examples)
+   - Shared utilities documentation
+   - Adding new hooks guide (TDD approach)
+   - Testing procedures
+   - Configuration patterns
+   - Troubleshooting
+   - Best practices
 
 ## Report
 
