@@ -117,5 +117,25 @@ def test_parse_hook_input_with_non_string_values():
     assert "content" not in tool_input
 
 
+def test_parse_hook_input_extracts_command():
+    """Test parse_hook_input extracts command field for Bash tool."""
+    input_json = json.dumps({
+        "session_id": "test123",
+        "transcript_path": "/path/to/transcript",
+        "cwd": "/project",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo hello"}
+    })
+
+    with patch('sys.stdin', StringIO(input_json)):
+        result = parse_hook_input()
+
+    assert result is not None
+    tool_name, tool_input = result
+    assert tool_name == "Bash"
+    assert tool_input.get("command") == "echo hello"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

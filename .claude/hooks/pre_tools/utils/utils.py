@@ -44,6 +44,12 @@ def parse_hook_input() -> Optional[Tuple[str, ToolInput]]:
         if isinstance(content_val, str):
             typed_tool_input["content"] = content_val
 
+    # Validate command is a string before adding
+    if "command" in tool_input_obj:
+        command_val: object = tool_input_obj["command"]  # type: ignore[reportUnknownVariableType]
+        if isinstance(command_val, str):
+            typed_tool_input["command"] = command_val
+
     return (tool_name, typed_tool_input)
 
 

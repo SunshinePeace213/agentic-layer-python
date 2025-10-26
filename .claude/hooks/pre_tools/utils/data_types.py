@@ -35,20 +35,27 @@ class ToolInput(TypedDict, total=False):
     Attributes:
         file_path: File path (for Read/Write/Edit/MultiEdit tools)
         content: File content string (for Write tool)
+        command: Shell command string (for Bash tool)
 
     Note:
-        Hooks that need additional fields (e.g., 'command' for Bash validation,
-        'path' for Glob operations) should access them directly from the raw
-        tool_input dict using .get(), or define their own extended TypedDict.
+        Hooks that need additional fields (e.g., 'path' for Glob operations)
+        should access them directly from the raw tool_input dict using .get(),
+        or define their own extended TypedDict.
 
     Example:
+        >>> # File operation
         >>> tool_input: ToolInput = {
         ...     "file_path": "/path/to/file.py",
         ...     "content": "print('hello')"
         ... }
+        >>> # Bash operation
+        >>> tool_input: ToolInput = {
+        ...     "command": "echo hello"
+        ... }
     """
     file_path: str
     content: str
+    command: str
 
 
 class HookInputData(TypedDict):
