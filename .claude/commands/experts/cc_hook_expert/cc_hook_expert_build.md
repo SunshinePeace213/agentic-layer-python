@@ -255,10 +255,11 @@ agents/                              # Hook output data
    - Validate Claude Code integration
 
    **Code Standards Checking**
-   Conduct comprehensive checking including: 
-   - Ruff Checking (python testing library via UV)
-   - basedpyright (python testing library via UV), config file is pyrightconfig.json
-   - vulture (python testing library via UV)
+   Conduct comprehensive checking including the source code and testing script though following methods: 
+   - Ruff Checking (python lint library via UV)
+   - basedpyright (python type checking library via UV) and config file is pyrightconfig.json
+    - Should not contain any typing error even the minor error until no error on typing checking stage
+   - vulture (python dead code checking library via UV)
    
 8. **Verify Integration**
    - Test hook triggers in actual Claude Code sessions

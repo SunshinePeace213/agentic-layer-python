@@ -5,239 +5,267 @@
 # ///
 """
 UV Workflow Enforcer - PreToolUse Hook
-========================================
+=======================================
+Enforces uv-based Python workflow by blocking direct python/pip usage.
 
-Enforces the use of UV for all Python-related commands during development,
-providing educational guidance and command alternatives.
+This hook ensures all Python script execution uses 'uv run' and all
+package installations use 'uv add' for better performance and consistency.
 
-REFACTORED: Uses shared utilities from utils/ to reduce code duplication.
+Blocked Patterns:
+- python script.py / python3 script.py
+- pip install package / pip3 install package
+- python -m pip install package
+
+Allowed Patterns:
+- uv run script.py
+- uv add package
+- python -c "code" (one-liners)
+- shell queries (which python, etc.)
+
+Usage:
+    This hook is automatically invoked by Claude Code before Bash execution.
+    It receives JSON input via stdin and outputs JSON permission decisions.
+
+Dependencies:
+    - Python >= 3.12
+    - No external packages (standard library only)
+    - Shared utilities from .claude/hooks/pre_tools/utils/
+
+Exit Codes:
+    0: Success (decision output via stdout)
+
+Author: Claude Code Hook Expert
+Version: 1.0.0
 """
 
 import re
 import sys
-from typing import Optional, Pattern, Tuple
+from typing import Optional, Tuple
 
-# Import shared utilities for input parsing and output formatting
+# Import shared utilities
 try:
     from .utils import parse_hook_input, output_decision
 except ImportError:
     from utils import parse_hook_input, output_decision
 
-# Compiled regex patterns for performance
-PYTHON_INTERPRETER: Pattern[str] = re.compile(r'\b(python3?(\.\d+)?)\s+')
-PIP_COMMAND: Pattern[str] = re.compile(r'\bpip3?\s+(install|uninstall|list|freeze|show)')
-UV_COMMAND: Pattern[str] = re.compile(r'\buv\s+(run|add|remove|sync|lock|pip)')
-SYSTEM_INFO: Pattern[str] = re.compile(r'\b(python3?|pip3?)\s+(--version|-V|--help|-h)\b')
-SHEBANG_CHECK: Pattern[str] = re.compile(r'(head|cat|grep).*python')
-STRING_CONTEXT: Pattern[str] = re.compile(r'(echo|printf|git\s+commit).*["\'].*python.*["\']')
-WHICH_PYTHON: Pattern[str] = re.compile(r'\bwhich\s+python')
+
+# ============ Pattern Definitions ============
+
+PYTHON_SCRIPT_PATTERN: re.Pattern[str] = re.compile(
+    r'\b(?:python3?|/usr/bin/python3?)\s+(?!-[cm]\b).*?[\w\./\-]+\.py\b',
+    re.IGNORECASE
+)
+
+PIP_INSTALL_PATTERN: re.Pattern[str] = re.compile(
+    r'\b(?:pip3?|python3?\s+-m\s+pip)\s+install\b',
+    re.IGNORECASE
+)
 
 
-def is_fallback_case(command: str) -> bool:
-    """Check if command is a legitimate fallback case."""
-    return bool(
-        UV_COMMAND.search(command) or
-        SYSTEM_INFO.search(command) or
-        SHEBANG_CHECK.search(command) or
-        STRING_CONTEXT.search(command) or
-        WHICH_PYTHON.search(command)
-    )
+# ============ Detection Functions ============
 
+def detect_python_script_execution(command: str) -> Optional[Tuple[str, str]]:
+    """
+    Detect direct python/python3 script execution.
 
-def detect_python_command(command: str) -> Optional[Tuple[str, str]]:
-    """Detect Python interpreter invocations and suggest UV."""
-    match = PYTHON_INTERPRETER.search(command)
-    if not match:
-        return None
-    
-    python_cmd = match.group(1)
-    suggestion = command.replace(python_cmd, "uv run", 1)
-    return (command, suggestion)
+    Args:
+        command: The bash command to analyze
 
+    Returns:
+        Tuple of (violation_type, message) if detected, None otherwise
 
-def detect_pip_command(command: str) -> Optional[Tuple[str, str, str]]:
-    """Detect pip commands and suggest UV equivalents."""
-    match = PIP_COMMAND.search(command)
-    if not match:
-        return None
-    
-    subcommand = match.group(1)
-    
-    if subcommand == "install":
-        if "-r requirements.txt" in command or "-r " in command:
-            suggestion = "uv sync"
-            msg_type = "pip_requirements"
-        elif "-e ." in command:
-            suggestion = command.replace("pip", "uv pip", 1)
-            msg_type = "fallback"
-        else:
-            pkg_match = re.search(r'install\s+([a-zA-Z0-9_\-]+)', command)
-            if pkg_match:
-                package = pkg_match.group(1)
-                suggestion = f"uv add {package}"
-            else:
-                suggestion = "uv add <package>"
-            msg_type = "pip_install"
-    
-    elif subcommand == "uninstall":
-        pkg_match = re.search(r'uninstall\s+([a-zA-Z0-9_\-]+)', command)
-        if pkg_match:
-            package = pkg_match.group(1)
-            suggestion = f"uv remove {package}"
-        else:
-            suggestion = "uv remove <package>"
-        msg_type = "pip_install"
-    
-    else:
-        suggestion = command.replace("pip", "uv pip", 1)
-        msg_type = "fallback"
-    
-    return (command, suggestion, msg_type)
+    Examples:
+        >>> detect_python_script_execution("python script.py")
+        ("direct_python_execution", "...")
+        >>> detect_python_script_execution("uv run script.py")
+        None
+    """
+    if PYTHON_SCRIPT_PATTERN.search(command):
+        return (
+            "direct_python_execution",
+            f"""🐍 UV Workflow Required: Direct python execution blocked
 
+Use uv for better performance and dependency management.
 
-def detect_uv_violation(command: str) -> Optional[Tuple[str, str, str]]:
-    """Detect UV workflow violations."""
-    pip_result = detect_pip_command(command)
-    if pip_result:
-        detected, suggested, msg_type = pip_result
-        return (detected, suggested, msg_type)
-    
-    python_result = detect_python_command(command)
-    if python_result:
-        detected, suggested = python_result
-        return (detected, suggested, "python")
-    
+Your command: {command}
+
+Recommended alternative:
+  uv run <script>.py [args]
+
+Why use uv run:
+  - Automatically manages virtual environments
+  - Respects inline script dependencies (PEP 723)
+  - Faster execution with optimized caching
+  - Consistent environment across all executions
+
+Examples:
+  uv run script.py --arg value
+  uv run --no-project script.py  # Skip project deps
+  uv run --with requests script.py  # Add runtime dep
+
+Note: python -c and python -m are still allowed for quick commands."""
+        )
     return None
 
 
-def generate_educational_message(detected_cmd: str, suggested_cmd: str, message_type: str) -> str:
-    """Generate educational message with UV alternatives."""
-    display_cmd = detected_cmd if len(detected_cmd) <= 60 else detected_cmd[:57] + "..."
-    
-    if message_type == "python":
-        return f"""🚫 Use UV to run Python scripts
+def detect_pip_install(command: str) -> Optional[Tuple[str, str]]:
+    """
+    Detect pip install commands.
 
-Command detected: {display_cmd}
-UV equivalent:    {suggested_cmd}
+    Args:
+        command: The bash command to analyze
 
-Benefits:
-• ✅ Runs in project's virtual environment automatically
-• ✅ Ensures dependencies are installed
-• ✅ Supports inline script metadata
-• ✅ Works with any Python version
+    Returns:
+        Tuple of (violation_type, message) if detected, None otherwise
 
-Common UV commands:
-  uv run <script>                # Run script
-  uv run --python 3.12 <script>  # Specific Python version
-  uv run python -m <module>      # Run module
+    Examples:
+        >>> detect_pip_install("pip install requests")
+        ("pip_install_blocked", "...")
+        >>> detect_pip_install("uv add requests")
+        None
+    """
+    if PIP_INSTALL_PATTERN.search(command):
+        return (
+            "pip_install_blocked",
+            f"""📦 UV Package Management Required: pip install blocked
 
-Learn more: https://docs.astral.sh/uv/guides/scripts/"""
-    
-    elif message_type == "pip_install":
-        return f"""🚫 Use UV instead of pip for package management
+Use uv for better performance and consistent dependency tracking.
 
-Command detected: {display_cmd}
-UV equivalent:    {suggested_cmd}
+Your command: {command}
 
-Why UV?
-• ⚡ 10-100x faster dependency resolution
-• 🔒 Automatic lock file management
-• 📦 Virtual environment handling built-in
-• 🎯 Works with pyproject.toml (modern Python standard)
+Recommended alternatives:
+  uv add <package>              # Add production dependency
+  uv add --dev <package>        # Add development dependency
+  uv add "package>=1.0,<2.0"    # With version constraints
 
-Common UV commands:
-  uv add <package>        # Add dependency
-  uv add --dev <package>  # Add dev dependency
-  uv remove <package>     # Remove dependency
-  uv sync                 # Install all dependencies
-  uv lock                 # Update lock file
+Why use uv add:
+  - 10-100x faster than pip install
+  - Automatically updates pyproject.toml
+  - Creates/updates uv.lock for reproducibility
+  - Better dependency resolution
+  - Unified project management
 
-Learn more: https://docs.astral.sh/uv/"""
-    
-    elif message_type == "pip_requirements":
-        return f"""🚫 Use UV sync instead of pip install -r
+For requirements.txt migration:
+  1. Review requirements.txt
+  2. Use: uv add <package1> <package2> <package3>
+  3. Or manually add to pyproject.toml dependencies"""
+        )
+    return None
 
-Command detected: {display_cmd}
-UV equivalent:    {suggested_cmd}
 
-Why uv sync?
-• 📋 Installs dependencies from pyproject.toml + uv.lock
-• 🔐 Ensures exact versions from lock file
-• 🎯 Creates/updates venv automatically
-• ⚡ Much faster than pip
+def should_allow_command(command: str) -> bool:
+    """
+    Check if command should be allowed despite containing 'python' keyword.
 
-Migration path:
-1. Convert requirements.txt to pyproject.toml
-2. Or use: uv pip install -r requirements.txt (fallback)
-3. Long-term: Move to pyproject.toml for modern Python packaging
+    Allowed patterns:
+    - python -c "code"  # One-liner
+    - python -m module  # Module execution (context-dependent)
+    - which python      # Shell queries
+    - echo "python"     # String literals
+    - type python       # Shell introspection
+    - uv run python script.py  # UV-managed execution
 
-Learn more: https://docs.astral.sh/uv/guides/projects/"""
-    
-    elif message_type == "fallback":
-        return f"""ℹ️ Consider using UV for this operation
+    Args:
+        command: The bash command to analyze
 
-Command detected: {display_cmd}
-UV suggestion:    {suggested_cmd}
+    Returns:
+        True if command should be allowed, False otherwise
 
-This operation may work, but UV provides better alternatives.
-The suggested command uses 'uv pip' as a fallback.
+    Examples:
+        >>> should_allow_command('python -c "print(1)"')
+        True
+        >>> should_allow_command("which python")
+        True
+        >>> should_allow_command("uv run python script.py")
+        True
+        >>> should_allow_command("python script.py")
+        False
+    """
+    # Check for uv run (which manages the execution)
+    if re.search(r'\buv\s+run\b', command):
+        return True
 
-Prefer native UV commands when possible:
-  uv add <package>     # Instead of pip install
-  uv remove <package>  # Instead of pip uninstall
-  uv sync              # Instead of pip install -r requirements.txt
+    # Check for one-liners
+    if re.search(r'\bpython3?\s+-c\s+', command):
+        return True
 
-Learn more: https://docs.astral.sh/uv/"""
-    
-    return f"""🚫 Use UV for Python workflow
+    # Check for shell queries
+    if re.search(r'\b(which|type|command\s+-v)\s+python3?\b', command):
+        return True
 
-Command detected: {display_cmd}
-UV equivalent:    {suggested_cmd}
+    # Check for echo/printf (not execution)
+    if re.search(r'\b(echo|printf)\s+.*python', command):
+        return True
 
-Learn more: https://docs.astral.sh/uv/"""
+    return False
+
+
+def validate_command(command: str) -> Optional[Tuple[str, str]]:
+    """
+    Validate command against all patterns.
+
+    Args:
+        command: The bash command to analyze
+
+    Returns:
+        Tuple of (violation_type, message) if violation detected, None otherwise
+
+    Examples:
+        >>> validate_command("python script.py")
+        ("direct_python_execution", "...")
+        >>> validate_command("uv run script.py")
+        None
+    """
+    # Check edge cases first (allow patterns)
+    if should_allow_command(command):
+        return None
+
+    # Check for direct python script execution
+    violation = detect_python_script_execution(command)
+    if violation:
+        return violation
+
+    # Check for pip install
+    violation = detect_pip_install(command)
+    if violation:
+        return violation
+
+    return None
 
 
 def main() -> None:
     """Main entry point for UV workflow enforcer hook."""
     try:
-        # Parse input using shared utility
+        # Parse hook input
         parsed = parse_hook_input()
         if not parsed:
-            # Error already handled by parse_hook_input
             output_decision("allow", "Failed to parse input (fail-safe)")
             return
-        
+
         tool_name, tool_input = parsed
-        
-        # Only validate Bash commands
+
+        # Only process Bash commands
         if tool_name != "Bash":
             output_decision("allow", "Not a Bash command")
             return
-        
-        # Extract command from tool input
+
+        # Get command from tool input
         command = tool_input.get("command", "")
-        
         if not command:
-            output_decision("allow", "No command to validate")
+            output_decision("allow", "No command provided")
             return
-        
-        # Check for fallback cases first
-        if is_fallback_case(command):
-            output_decision("allow", "Legitimate UV fallback or system command")
-            return
-        
-        # Detect UV violations
-        violation = detect_uv_violation(command)
-        
+
+        # Validate command
+        violation = validate_command(command)
+
         if violation:
-            detected_cmd, suggested_cmd, msg_type = violation
-            message = generate_educational_message(detected_cmd, suggested_cmd, msg_type)
+            _, message = violation
             output_decision("deny", message, suppress_output=True)
         else:
             output_decision("allow", "Command follows UV workflow")
-    
+
     except Exception as e:
-        # Fail-safe: allow operation on any error
+        # Fail-safe: allow on any error to not break Claude operations
         print(f"UV workflow enforcer error: {e}", file=sys.stderr)
         output_decision("allow", f"Hook error (fail-safe): {e}")
 

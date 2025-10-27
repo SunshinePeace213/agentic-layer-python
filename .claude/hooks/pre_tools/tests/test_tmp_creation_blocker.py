@@ -25,8 +25,10 @@ Usage:
 
 import json
 import sys
+import time
 from io import StringIO
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -205,9 +207,9 @@ class TestWriteToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-                assert "/tmp/test.txt" in output["hookSpecificOutput"]["permissionDecisionReason"]
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
+                assert "/tmp/test.txt" in cast(str, cast(dict[str, object], output["hookSpecificOutput"])["permissionDecisionReason"])
                 assert output.get("suppressOutput") is True
 
     def test_hook_allows_write_to_project(self):
@@ -227,8 +229,8 @@ class TestWriteToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
     def test_hook_allows_write_to_relative_tmp(self):
         """Test hook allows Write to relative ./tmp path."""
@@ -247,8 +249,8 @@ class TestWriteToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
 
 # ==================== Integration Tests - Edit Tool ====================
@@ -277,8 +279,8 @@ class TestEditToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
 
     def test_hook_allows_edit_to_project(self):
         """Test hook allows Edit to project directory."""
@@ -301,8 +303,8 @@ class TestEditToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
 
 # ==================== Integration Tests - NotebookEdit Tool ====================
@@ -327,8 +329,8 @@ class TestNotebookEditToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
 
     def test_hook_allows_notebook_edit_to_project(self):
         """Test hook allows NotebookEdit to project directory."""
@@ -347,8 +349,8 @@ class TestNotebookEditToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
 
 # ==================== Integration Tests - Bash Tool ====================
@@ -373,10 +375,11 @@ class TestBashToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-                assert "/tmp/output.txt" in output["hookSpecificOutput"]["permissionDecisionReason"]
-                assert "echo test > /tmp/output.txt" in output["hookSpecificOutput"]["permissionDecisionReason"]
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
+                reason = cast(str, cast(dict[str, object], output["hookSpecificOutput"])["permissionDecisionReason"])
+                assert "/tmp/output.txt" in reason
+                assert "echo test > /tmp/output.txt" in reason
 
     def test_hook_blocks_bash_touch_to_tmp(self):
         """Test hook blocks Bash touch to /tmp."""
@@ -395,8 +398,8 @@ class TestBashToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
 
     def test_hook_blocks_bash_tee_to_tmp(self):
         """Test hook blocks Bash tee to /tmp."""
@@ -415,8 +418,8 @@ class TestBashToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "deny"
 
     def test_hook_allows_bash_redirect_to_project(self):
         """Test hook allows Bash redirect to project directory."""
@@ -435,8 +438,8 @@ class TestBashToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
     def test_hook_allows_bash_no_file_creation(self):
         """Test hook allows Bash commands that don't create files."""
@@ -455,8 +458,8 @@ class TestBashToolIntegration:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
 
 # ==================== Edge Cases and Error Handling ====================
@@ -481,8 +484,8 @@ class TestEdgeCases:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
     def test_hook_handles_empty_command(self):
         """Test handling of empty bash command."""
@@ -501,8 +504,8 @@ class TestEdgeCases:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
     def test_hook_handles_invalid_json(self):
         """Test handling of invalid JSON input."""
@@ -514,9 +517,10 @@ class TestEdgeCases:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
-                assert "fail-safe" in output["hookSpecificOutput"]["permissionDecisionReason"].lower()
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
+                reason = cast(str, cast(dict[str, object], output["hookSpecificOutput"])["permissionDecisionReason"])
+                assert "fail-safe" in reason.lower()
 
     def test_hook_allows_other_tools(self):
         """Test that hook allows tools it doesn't monitor."""
@@ -535,8 +539,8 @@ class TestEdgeCases:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
     def test_hook_handles_missing_tool_input(self):
         """Test handling when tool_input is missing."""
@@ -554,8 +558,8 @@ class TestEdgeCases:
                     main()
 
                 assert exc_info.value.code == 0
-                output = json.loads(mock_stdout.getvalue())
-                assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+                output = cast(dict[str, object], json.loads(mock_stdout.getvalue()))
+                assert cast(dict[str, object], output["hookSpecificOutput"])["permissionDecision"] == "allow"
 
 
 # ==================== Performance Tests ====================
@@ -571,7 +575,6 @@ class TestPerformance:
 
     def test_validation_is_fast(self):
         """Test that validation completes quickly."""
-        import time
         start = time.time()
         for _ in range(100):
             check_path_is_temp_directory("/tmp/test.txt")
