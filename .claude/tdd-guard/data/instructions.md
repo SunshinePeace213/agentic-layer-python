@@ -25,11 +25,12 @@ The foundation of TDD is the Red-Green-Refactor cycle:
 
 ### TDD METHODOLOGY GUIDANCE
 
+- The Spec-Driven Development's plan already provided all required information but sticks to Test-Driven Development for entire development
 - Start by writing a failing test that defines a small increment of functionality
 - Use meaningful test names that describe behavior (e.g., "shouldSumTwoPositiveNumbers")
 - Make test failures clear and informative
 - Write just enough code to make the test pass - no more
-- Once tests pass, consider if refactoring is needed
+- Once tests pass, refactoring the source code by following the plans for maintaining code quality
 - Repeat the cycle for new functionality
 
 ### TIDY FIRST APPROACH
@@ -54,22 +55,23 @@ The foundation of TDD is the Red-Green-Refactor cycle:
 
 1. **Multiple Test Addition**
    - Adding more than one new test at once
-   - Exception: Initial test file setup or extracting shared test utilities
+   - Exception: Initial test file setup, extracting shared test utilities or well-defined tests but do not fill-in any logic
 
 2. **Over-Implementation**  
    - Code that exceeds what's needed to pass the current failing test
    - Adding untested features, methods, or error handling
    - Implementing multiple methods when test only requires one
+   - Exception: Initial typing, classes, functions, configs or extracting shared test utilities
 
 3. **Premature Implementation**
    - Adding implementation before a test exists and fails properly
    - Adding implementation without running the test first
    - Refactoring when tests haven't been run or are failing
 
-
-
 ### Critical Principle: Incremental Development
+
 Each step in TDD should address ONE specific issue:
+
 - Test fails "not defined" → Create empty stub/class only
 - Test fails "not a function" → Add method stub only  
 - Test fails with assertion → Implement minimal logic only
@@ -77,15 +79,18 @@ Each step in TDD should address ONE specific issue:
 ### TDD EXAMPLE WORKFLOW
 
 When approaching a new feature:
+
 1. Write a simple failing test for a small part of the feature
 2. Implement the bare minimum to make it pass
 3. Run tests to confirm they pass (Green)
 4. Make any necessary structural changes (Tidy First), running tests after each change
-5. Commit structural changes separately
-6. Add another test for the next small increment of functionality
-7. Repeat until the feature is complete, committing behavioral changes separately from structural ones
+5. Refactor code while test is passed (Refactor)
+6. Commit structural changes separately
+7. Add another test for the next small increment of functionality
+8. Repeat until the feature is complete, committing behavioral changes separately from structural ones
 
 ### General Information
+
 - Follows Test-Driven Development (TDD) and Tidy First principles on development
 - Sometimes the test output shows as no tests have been run when a new test is failing due to a missing import or constructor. In such cases, allow the agent to create simple stubs. Ask them if they forgot to create a stub if they are stuck.
 - It is never allowed to introduce new logic without evidence of relevant failing tests. However, stubs and simple implementation to make imports and test infrastructure work is fine.
