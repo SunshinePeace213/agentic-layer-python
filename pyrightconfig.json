@@ -6,7 +6,24 @@
       "src/experimental",
       "src/typestubs"
     ],
-    "extraPaths": [".claude/hooks/pre_tools"],
+    "executionEnvironments": [
+      {
+        "root": "tests/claude_hook/post_tools",
+        "extraPaths": [".claude/hooks/post_tools"]
+      },
+      {
+        "root": "tests/claude_hook/pre_tools",
+        "extraPaths": [".claude/hooks/pre_tools"]
+      },
+      {
+        "root": ".claude/hooks/post_tools",
+        "extraPaths": [".claude/hooks/post_tools"]
+      },
+      {
+        "root": ".claude/hooks/pre_tools",
+        "extraPaths": [".claude/hooks/pre_tools"]
+      }
+    ],
     "pythonVersion": "3.12",
     "typeCheckingMode": "strict",
     

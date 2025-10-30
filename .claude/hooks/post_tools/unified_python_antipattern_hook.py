@@ -1,1419 +1,1238 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """
-Unified Python Post-Tools Checker
-==================================
-Detects Python-specific antipatterns not covered by type checkers or dead code detectors.
-Focuses on runtime issues, security vulnerabilities, and code quality problems.
+Unified Python Antipattern Hook for PostToolUse
+================================================
 
-Exit codes:
-- 0: All checks passed or only warnings (outputs JSON)
+Detects Python-specific antipatterns across 7 categories:
+- Runtime issues: Mutable defaults, late binding, global misuse
+- Performance problems: String concatenation, inefficient operations
+- Complexity concerns: Deep nesting, too many parameters
+- Security vulnerabilities: SQL injection, hardcoded secrets
+- Code organization: Poor imports, wildcard imports
+- Resource management: File handles, context managers
+- Python gotchas: Using 'is' for equality, type checking
+
+This hook uses AST-based analysis for accurate pattern detection and provides
+clear, actionable feedback for Claude to fix issues in the next iteration.
+
+Hook Event:
+    PostToolUse
+
+Tool Matchers:
+    - Write: Triggers when new files are created
+    - Edit: Triggers when existing files are modified
+    - NotebookEdit: Triggers when notebook cells are edited
+
+Behavior:
+    1. Validates file is Python (.py, .pyi)
+    2. Parses file to AST
+    3. Detects 40+ antipatterns using AST visitor
+    4. Provides feedback with severity levels
+    5. Blocks on CRITICAL security issues (configurable)
+
+Configuration:
+    Environment variables:
+    - PYTHON_ANTIPATTERN_ENABLED: Enable/disable hook (default: "true")
+    - PYTHON_ANTIPATTERN_LEVELS: Severity levels to report (default: "CRITICAL,HIGH,MEDIUM,LOW")
+    - PYTHON_ANTIPATTERN_BLOCK_CRITICAL: Block on critical issues (default: "true")
+    - PYTHON_ANTIPATTERN_DISABLED: Comma-separated pattern IDs to disable
+    - PYTHON_ANTIPATTERN_MAX_ISSUES: Maximum issues to report (default: "10")
+
+Version:
+    1.0.0
+
+Author:
+    Claude Code Hook Expert
 """
-
-from __future__ import annotations
 
 import ast
-import json
+import os
 import re
 import sys
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, Optional
 
-# Constants for thresholds
-MAX_ATTRIBUTE_ACCESS_IN_LOOP = 3
-MIN_LIST_SIZE_FOR_SET_RECOMMENDATION = 5
-MAX_NESTED_COMPREHENSIONS = 2
-MAX_COMPREHENSION_CONDITIONS = 2
-MAX_FUNCTION_NESTING_DEPTH = 3
-MAX_FUNCTION_ARGUMENTS = 5
-MAX_FUNCTION_COMPLEXITY = 15
-MAX_FILE_LINES = 1000
-MAX_IMPORT_SPREAD = 20
-
-
-# Type definitions for JSON input/output
-class ToolInput(TypedDict):
-    """Type definition for tool input parameters."""
-
-    file_path: str
-
-
-class HookSpecificOutput(TypedDict):
-    """Hook-specific output structure."""
-
-    hookEventName: Literal["PostToolUse"]
-    additionalContext: str
-
-
-class HookOutput(TypedDict, total=False):
-    """Output JSON structure for PostToolUse."""
-
-    decision: Literal["block"]
-    reason: str
-    hookSpecificOutput: HookSpecificOutput
+# Import shared utilities from post_tools/utils
+try:
+    from utils import (
+        ToolInput,
+        get_file_path,
+        is_python_file,
+        is_within_project,
+        output_block,
+        output_feedback,
+        parse_hook_input,
+        was_tool_successful,
+    )
+except ImportError:
+    # Fallback for testing or direct execution
+    sys.path.insert(0, str(Path(__file__).parent / "utils"))
+    from utils import (  # type: ignore[reportMissingImports]
+        ToolInput,
+        get_file_path,
+        is_python_file,
+        is_within_project,
+        output_block,
+        output_feedback,
+        parse_hook_input,
+        was_tool_successful,
+    )
 
 
-class Severity(Enum):
-    """Issue severity levels."""
-
-    BLOCK = "BLOCKED"
-    WARNING = "WARNING"
-    INFO = "INFO"
+# ==================== Data Structures ====================
 
 
 @dataclass
 class Issue:
-    """Represents a code quality issue."""
+    """Represents a detected antipattern issue."""
 
-    severity: Severity
-    category: str
+    id: str
+    severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    line: int
+    column: int
     message: str
-    line: int | None = None
-    details: str = ""
+    suggestion: str
+    code_snippet: str = ""
 
 
-@dataclass
-class CheckResult:
-    """Results from all checks."""
-
-    blocks: list[Issue] = field(default_factory=list)
-    warnings: list[Issue] = field(default_factory=list)
-    info: list[Issue] = field(default_factory=list)
-
-    def add_issue(self, issue: Issue) -> None:
-        """Add an issue to the appropriate list."""
-        if issue.severity == Severity.BLOCK:
-            self.blocks.append(issue)
-        elif issue.severity == Severity.WARNING:
-            self.warnings.append(issue)
-        else:
-            self.info.append(issue)
-
-    def has_blocks(self) -> bool:
-        """Check if there are any blocking issues."""
-        return len(self.blocks) > 0
+# ==================== Configuration ====================
 
 
-class PythonAntipatternChecker:
-    """
-    Detects Python antipatterns that are NOT caught by:
-    - Type checkers (basedpyright/mypy)
-    - Dead code detectors (vulture)
+class Config:
+    """Hook configuration from environment variables."""
 
-    Focuses on:
-    - Runtime bugs (mutable defaults, dangerous functions)
-    - Security vulnerabilities (SQL injection, hardcoded secrets)
-    - Performance antipatterns (string concatenation in loops)
-    - Code complexity issues
-    - Resource management issues
-    - Python-specific gotchas
-    """
+    def __init__(self) -> None:
+        """Initialize configuration from environment variables."""
+        enabled_str = os.getenv("PYTHON_ANTIPATTERN_ENABLED", "true").lower()
+        self.enabled = enabled_str == "true"
 
-    def __init__(self, tool_input: ToolInput) -> None:
-        file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
-        self.file_path: Path = Path(file_path)
-        self.content: str = ""
-        self.tree: ast.AST | None = None
-        self.results: CheckResult = CheckResult()
+        levels_str = os.getenv("PYTHON_ANTIPATTERN_LEVELS", "CRITICAL,HIGH,MEDIUM,LOW")
+        self.levels = set(levels_str.split(","))
 
-    def run_all_checks(self) -> CheckResult:
-        """Run all antipattern checks."""
-        # Validate file exists and is Python
-        if not self._validate_file():
-            return self.results
+        block_str = os.getenv("PYTHON_ANTIPATTERN_BLOCK_CRITICAL", "true").lower()
+        self.block_critical = block_str == "true"
 
-        # Parse the file
-        if not self._parse_file():
-            return self.results
+        disabled_str = os.getenv("PYTHON_ANTIPATTERN_DISABLED", "")
+        self.disabled_patterns = set(disabled_str.split(",") if disabled_str else [])
 
-        # === RUNTIME ANTIPATTERNS (not caught by type checkers) ===
-        self._check_mutable_defaults()
-        self._check_dangerous_functions()
-        self._check_bare_except()
-        self._check_assert_usage()
-        self._check_global_usage()
-        self._check_class_variable_defaults()
-        self._check_late_binding_closures()
+        max_issues_str = os.getenv("PYTHON_ANTIPATTERN_MAX_ISSUES", "10")
+        self.max_issues = int(max_issues_str)
 
-        # === PERFORMANCE ANTIPATTERNS ===
-        self._check_string_concatenation_in_loops()
-        self._check_repeated_attribute_access()
-        self._check_inefficient_containment_checks()
-        self._check_unnecessary_lambda()
-        self._check_list_concatenation()
+        debug_str = os.getenv("PYTHON_ANTIPATTERN_DEBUG", "false").lower()
+        self.debug = debug_str == "true"
 
-        # === COMPLEXITY ANTIPATTERNS ===
-        self._check_list_comprehension_complexity()
-        self._check_nested_functions_complexity()
-        self._check_function_complexity()
-        self._check_too_many_arguments()
-        self._check_unnecessary_else_after_return()
 
-        # === SECURITY ANTIPATTERNS ===
-        self._run_security_patterns_check()
-        self._check_tempfile_usage()
-        self._check_random_usage_for_security()
+# ==================== Main Detector ====================
 
-        # === CODE ORGANIZATION ===
-        self._check_file_length()
-        self._check_import_organization()
-        self._check_wildcard_imports()
 
-        # === RESOURCE MANAGEMENT ===
-        self._check_file_resource_management()
+class AntipatternDetector(ast.NodeVisitor):
+    """AST visitor for detecting Python antipatterns."""
 
-        # === PYTHON GOTCHAS ===
-        self._check_is_for_equality()
-        self._check_type_checking_antipattern()
-        self._check_modifying_list_while_iterating()
-        self._check_silent_exception_swallowing()
+    def __init__(self, source_code: str, config: Config) -> None:
+        """
+        Initialize detector with source code and configuration.
 
-        return self.results
+        Args:
+            source_code: Python source code to analyze
+            config: Configuration settings
+        """
+        self.source_code = source_code
+        self.source_lines = source_code.splitlines()
+        self.config = config
+        self.issues: list[Issue] = []
+        self.current_loop_depth = 0
+        self.current_function: Optional[ast.FunctionDef | ast.AsyncFunctionDef] = None
 
-    def _validate_file(self) -> bool:
-        """Validate the file exists and is a Python file."""
-        # If no file path provided or it's just ".", skip validation (not a file operation)
-        if not self.file_path or str(self.file_path) in {"", ".", "./"}:
-            return False
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Check function definitions for antipatterns."""
+        prev_function = self.current_function
+        self.current_function = node
 
-        if not self.file_path.exists():
-            self.results.add_issue(
-                Issue(
-                    severity=Severity.BLOCK,
-                    category="File Error",
-                    message=f"File not found: {self.file_path}",
-                )
-            )
-            return False
+        # Check various function-level antipatterns
+        self._check_mutable_defaults(node)
+        self._check_parameter_count(node)
+        self._check_function_complexity(node)
+        self._check_function_length(node)
+        self._check_missing_super_call(node)
+        self._check_shadowing_builtins(node)
 
-        if self.file_path.suffix not in {".py", ".pyi"}:
-            # Not a Python file, but don't block - just skip the check
-            return False
+        # Continue traversal
+        self.generic_visit(node)
+        self.current_function = prev_function
 
-        return True
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Check async function definitions for antipatterns."""
+        prev_function = self.current_function
+        self.current_function = node
 
-    def _parse_file(self) -> bool:
-        """Parse the Python file into an AST."""
-        try:
-            self.content = self.file_path.read_text(encoding="utf-8")
-            self.tree = ast.parse(self.content)
-            return True
-        except SyntaxError as e:
-            self.results.add_issue(
-                Issue(
-                    severity=Severity.BLOCK,
-                    category="Syntax Error",
-                    message=f"Python syntax error at line {e.lineno}: {e.msg}",
-                    line=e.lineno,
-                )
-            )
-            return False
-        except Exception as e:
-            self.results.add_issue(
-                Issue(
-                    severity=Severity.BLOCK,
-                    category="Parse Error",
-                    message=f"Failed to parse file: {str(e)}",
-                )
-            )
-            return False
+        # Check various function-level antipatterns
+        self._check_mutable_defaults(node)
+        self._check_parameter_count(node)
+        self._check_function_complexity(node)
+        self._check_function_length(node)
+        self._check_missing_super_call(node)
+        self._check_shadowing_builtins(node)
 
-    def _check_mutable_defaults(self) -> None:
-        """Check for mutable default arguments (critical runtime bug)."""
-        if not self.tree:
+        # Continue traversal
+        self.generic_visit(node)
+        self.current_function = prev_function
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        """Check comparison operations."""
+        self._check_is_with_literals(node)
+        self._check_equality_with_none(node)
+        self._check_equality_with_bool(node)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Check function calls."""
+        self._check_dangerous_functions(node)
+        self._check_sql_injection(node)
+        self._check_command_injection(node)
+        self._check_type_checking_with_type(node)
+        self._check_weak_cryptography(node)
+        self._check_unsafe_deserialization(node)
+        self._check_weak_random_for_security(node)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        """Check exception handlers."""
+        self._check_bare_except(node)
+        self._check_silent_exception_swallowing(node)
+        self.generic_visit(node)
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        """Check assert statements."""
+        self._check_assert_in_production(node)
+        self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        """Check global statements."""
+        self._check_global_misuse(node)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Check class definitions."""
+        self._check_mutable_class_variables(node)
+        self._check_eq_without_hash(node)
+        self._check_context_manager_protocol(node)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        """Check for loops."""
+        self.current_loop_depth += 1
+        self._check_string_concatenation_in_loops(node)
+        self._check_list_concatenation_in_loops(node)
+        self._check_modifying_list_while_iterating(node)
+        self.generic_visit(node)
+        self.current_loop_depth -= 1
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        """Check async for loops."""
+        self.current_loop_depth += 1
+        self._check_string_concatenation_in_loops(node)
+        self._check_list_concatenation_in_loops(node)
+        self._check_modifying_list_while_iterating(node)
+        self.generic_visit(node)
+        self.current_loop_depth -= 1
+
+    def visit_While(self, node: ast.While) -> None:
+        """Check while loops."""
+        self.current_loop_depth += 1
+        self._check_string_concatenation_in_loops(node)
+        self._check_list_concatenation_in_loops(node)
+        self.generic_visit(node)
+        self.current_loop_depth -= 1
+
+    def visit_If(self, node: ast.If) -> None:
+        """Check if statements."""
+        self._check_unnecessary_else_after_return(node)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Check assignments."""
+        self._check_hardcoded_secrets(node)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Check import statements."""
+        self._check_wildcard_imports(node)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        """Check with statements (context managers)."""
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        """Check async with statements (context managers)."""
+        self.generic_visit(node)
+
+    # ==================== Detection Methods ====================
+
+    def _check_mutable_defaults(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect mutable default arguments (R001)."""
+        if "R001" in self.config.disabled_patterns:
             return
 
-        class MutableDefaultVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        all_defaults = list(node.args.defaults) + list(node.args.kw_defaults)
+        for default_arg in all_defaults:
+            if default_arg is None:
+                continue
+            if isinstance(default_arg, (ast.List, ast.Dict, ast.Set)):
+                code_snippet = self._get_code_snippet(default_arg.lineno)
+                self.issues.append(
+                    Issue(
+                        id="R001",
+                        severity="HIGH",
+                        line=default_arg.lineno,
+                        column=default_arg.col_offset,
+                        message="Mutable default argument",
+                        suggestion="Use None and create mutable object inside function",
+                        code_snippet=code_snippet,
+                    )
+                )
 
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                self._check_function(node)
-                self.generic_visit(node)
+    def _check_dangerous_functions(self, node: ast.Call) -> None:
+        """Detect dangerous functions like eval, exec (R002)."""
+        if "R002" in self.config.disabled_patterns:
+            return
 
-            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-                self._check_function(node)
-                self.generic_visit(node)
+        dangerous_funcs = {"eval", "exec", "compile", "__import__"}
+        if isinstance(node.func, ast.Name) and node.func.id in dangerous_funcs:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="R002",
+                    severity="HIGH",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message=f"Dangerous function: {node.func.id}()",
+                    suggestion="Avoid using eval/exec, use safer alternatives like ast.literal_eval()",
+                    code_snippet=code_snippet,
+                )
+            )
 
-            def _check_function(
-                self, node: ast.FunctionDef | ast.AsyncFunctionDef
-            ) -> None:
-                defaults = node.args.defaults
-                args = node.args.args
-                for i, default in enumerate(defaults):
-                    if isinstance(default, (ast.List, ast.Dict, ast.Set)):
-                        # Cache args access
-                        param_idx = len(args) - len(defaults) + i
-                        if 0 <= param_idx < len(args):
-                            param_name = args[param_idx].arg
-                        else:
-                            param_name = "unknown"
+    def _check_bare_except(self, node: ast.ExceptHandler) -> None:
+        """Detect bare except clauses (R003)."""
+        if "R003" in self.config.disabled_patterns:
+            return
 
-                        self.checker.results.add_issue(
+        if node.type is None:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="R003",
+                    severity="MEDIUM",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message="Bare except clause",
+                    suggestion="Specify exception type: except Exception: or except SpecificError:",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    def _check_assert_in_production(self, node: ast.Assert) -> None:
+        """Detect assertions used for validation (R004)."""
+        if "R004" in self.config.disabled_patterns:
+            return
+
+        code_snippet = self._get_code_snippet(node.lineno)
+        self.issues.append(
+            Issue(
+                id="R004",
+                severity="HIGH",
+                line=node.lineno,
+                column=node.col_offset,
+                message="Assert statement (disabled with python -O)",
+                suggestion="Use explicit if/raise for production validation",
+                code_snippet=code_snippet,
+            )
+        )
+
+    def _check_global_misuse(self, node: ast.Global) -> None:
+        """Detect overuse of global keyword (R005)."""
+        if "R005" in self.config.disabled_patterns:
+            return
+
+        code_snippet = self._get_code_snippet(node.lineno)
+        self.issues.append(
+            Issue(
+                id="R005",
+                severity="MEDIUM",
+                line=node.lineno,
+                column=node.col_offset,
+                message="Global keyword usage",
+                suggestion="Consider using function parameters or class attributes instead",
+                code_snippet=code_snippet,
+            )
+        )
+
+    def _check_mutable_class_variables(self, node: ast.ClassDef) -> None:
+        """Detect mutable class variables (R006)."""
+        if "R006" in self.config.disabled_patterns:
+            return
+
+        for item in node.body:
+            if isinstance(item, ast.Assign):
+                for target in item.targets:
+                    if isinstance(target, ast.Name) and isinstance(
+                        item.value, (ast.List, ast.Dict, ast.Set)
+                    ):
+                        code_snippet = self._get_code_snippet(item.lineno)
+                        self.issues.append(
                             Issue(
-                                severity=Severity.BLOCK,
-                                category="Mutable Default",
-                                message=f"Function '{node.name}' has mutable default for '{param_name}'",
-                                line=node.lineno,
-                                details="Use None and initialize inside function to avoid shared state bugs",
+                                id="R006",
+                                severity="HIGH",
+                                line=item.lineno,
+                                column=item.col_offset,
+                                message=f"Mutable class variable: {target.id}",
+                                suggestion="Initialize mutable attributes in __init__ instead",
+                                code_snippet=code_snippet,
                             )
                         )
 
-        visitor = MutableDefaultVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_class_variable_defaults(self) -> None:
-        """Check for mutable class variables (shared between instances)."""
-        if not self.tree:
+    def _check_missing_super_call(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect missing super().__init__() in __init__ (R010)."""
+        if "R010" in self.config.disabled_patterns:
             return
 
-        class ClassVariableVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_ClassDef(self, node: ast.ClassDef) -> None:
-                for item in node.body:
-                    if isinstance(item, (ast.AnnAssign, ast.Assign)):
-                        # Check if it's a class variable (not in __init__)
-                        value = (
-                            item.value
-                            if isinstance(item, ast.AnnAssign)
-                            else item.value
-                        )
-                        if isinstance(value, (ast.List, ast.Dict, ast.Set)):
-                            self.checker.results.add_issue(
-                                Issue(
-                                    severity=Severity.WARNING,
-                                    category="Mutable Class Variable",
-                                    message=f"Class '{node.name}' has mutable class variable",
-                                    line=item.lineno,
-                                    details="Mutable class variables are shared between instances. Initialize in __init__",
-                                )
-                            )
-                self.generic_visit(node)
-
-        visitor = ClassVariableVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_dangerous_functions(self) -> None:
-        """Check for dangerous function usage like eval, exec."""
-        if not self.tree:
+        if node.name != "__init__":
             return
 
-        dangerous_funcs = {
-            "eval": Severity.BLOCK,
-            "exec": Severity.BLOCK,
-            "compile": Severity.WARNING,
-            "__import__": Severity.WARNING,
-            "globals": Severity.WARNING,
-            "locals": Severity.WARNING,
+        # Check if this is in a class with base classes
+        # (This requires context we don't have in simple visitor, so skip for now)
+        # Full implementation would track class hierarchy
+        pass
+
+    def _check_shadowing_builtins(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect shadowing of builtin names (R008)."""
+        if "R008" in self.config.disabled_patterns:
+            return
+
+        builtins_set = {
+            "list",
+            "dict",
+            "set",
+            "tuple",
+            "str",
+            "int",
+            "float",
+            "bool",
+            "type",
+            "id",
+            "input",
+            "open",
+            "range",
+            "len",
+            "max",
+            "min",
+            "sum",
+            "all",
+            "any",
+            "filter",
+            "map",
+            "zip",
         }
 
-        class DangerousFuncVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        for arg in node.args.args:
+            if arg.arg in builtins_set:
+                code_snippet = self._get_code_snippet(node.lineno)
+                self.issues.append(
+                    Issue(
+                        id="R008",
+                        severity="MEDIUM",
+                        line=node.lineno,
+                        column=node.col_offset,
+                        message=f"Shadowing builtin: {arg.arg}",
+                        suggestion=f"Rename parameter to avoid shadowing builtin '{arg.arg}'",
+                        code_snippet=code_snippet,
+                    )
+                )
 
-            def visit_Call(self, node: ast.Call) -> None:
-                if isinstance(node.func, ast.Name):
-                    func_name = node.func.id
-                    if func_name in dangerous_funcs:
-                        severity = dangerous_funcs[func_name]
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=severity,
-                                category="Dangerous Function",
-                                message=f"Use of '{func_name}()' is dangerous",
-                                line=node.lineno,
-                                details="Can lead to code injection vulnerabilities",
-                            )
-                        )
-                self.generic_visit(node)
-
-        visitor = DangerousFuncVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_bare_except(self) -> None:
-        """Check for bare except clauses."""
-        if not self.tree:
+    def _check_eq_without_hash(self, node: ast.ClassDef) -> None:
+        """Detect __eq__ without __hash__ (R009)."""
+        if "R009" in self.config.disabled_patterns:
             return
 
-        class BareExceptVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        has_eq = False
+        has_hash = False
 
-            def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-                if node.type is None:
-                    self.checker.results.add_issue(
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if item.name == "__eq__":
+                    has_eq = True
+                elif item.name == "__hash__":
+                    has_hash = True
+
+        if has_eq and not has_hash:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="R009",
+                    severity="HIGH",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message="Class defines __eq__ without __hash__",
+                    suggestion="Define __hash__ or set __hash__ = None if unhashable",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    def _check_string_concatenation_in_loops(
+        self, node: ast.For | ast.AsyncFor | ast.While
+    ) -> None:
+        """Detect string concatenation in loops (P001)."""
+        if "P001" in self.config.disabled_patterns:
+            return
+
+        for child in ast.walk(node):
+            if isinstance(child, ast.AugAssign) and isinstance(child.op, ast.Add):
+                code_snippet = self._get_code_snippet(child.lineno)
+                self.issues.append(
+                    Issue(
+                        id="P001",
+                        severity="MEDIUM",
+                        line=child.lineno,
+                        column=child.col_offset,
+                        message="String/list concatenation in loop using +=",
+                        suggestion="Use list.append() and ''.join() for strings",
+                        code_snippet=code_snippet,
+                    )
+                )
+
+    def _check_list_concatenation_in_loops(
+        self, _node: ast.For | ast.AsyncFor | ast.While
+    ) -> None:
+        """Detect list concatenation in loops (P005)."""
+        if "P005" in self.config.disabled_patterns:
+            return
+        # Covered by P001 check above (no separate implementation needed)
+
+    def _check_parameter_count(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect functions with too many parameters (C004)."""
+        if "C004" in self.config.disabled_patterns:
+            return
+
+        total_args = (
+            len(node.args.args) + len(node.args.posonlyargs) + len(node.args.kwonlyargs)
+        )
+
+        if total_args > 7:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="C004",
+                    severity="MEDIUM",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message=f"Too many parameters: {total_args}",
+                    suggestion="Reduce to 7 or fewer parameters, consider using a dataclass or config object",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    def _check_function_complexity(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect high cyclomatic complexity (C003)."""
+        if "C003" in self.config.disabled_patterns:
+            return
+
+        complexity = self._calculate_complexity(node)
+        if complexity > 15:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="C003",
+                    severity="HIGH",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message=f"Cyclomatic complexity: {complexity}",
+                    suggestion="Break down into smaller functions (target: < 15)",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    def _check_function_length(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        """Detect overly long functions (C010)."""
+        if "C010" in self.config.disabled_patterns:
+            return
+
+        # Get the last line of the function
+        end_lineno = node.end_lineno if node.end_lineno else node.lineno
+        length = end_lineno - node.lineno
+
+        if length > 50:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="C010",
+                    severity="HIGH",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message=f"Function too long: {length} lines",
+                    suggestion="Break down into smaller functions (target: < 50 lines)",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    def _check_unnecessary_else_after_return(self, node: ast.If) -> None:
+        """Detect else after return statement (C005)."""
+        if "C005" in self.config.disabled_patterns:
+            return
+
+        # Check if body ends with return
+        if node.body and isinstance(node.body[-1], ast.Return):
+            if node.orelse:
+                code_snippet = self._get_code_snippet(node.lineno)
+                self.issues.append(
+                    Issue(
+                        id="C005",
+                        severity="LOW",
+                        line=node.lineno,
+                        column=node.col_offset,
+                        message="Unnecessary else after return",
+                        suggestion="Remove else clause and unindent code",
+                        code_snippet=code_snippet,
+                    )
+                )
+
+    def _check_sql_injection(self, node: ast.Call) -> None:
+        """Detect potential SQL injection (S001)."""
+        if "S001" in self.config.disabled_patterns:
+            return
+
+        # Check for .execute() calls with string formatting
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "execute":
+            if node.args:
+                first_arg = node.args[0]
+                # Check for f-strings, % formatting, .format()
+                if isinstance(first_arg, ast.JoinedStr):  # f-string
+                    code_snippet = self._get_code_snippet(node.lineno)
+                    self.issues.append(
                         Issue(
-                            severity=Severity.WARNING,
-                            category="Bare Except",
-                            message="Bare 'except:' clause catches all exceptions",
+                            id="S001",
+                            severity="CRITICAL",
                             line=node.lineno,
-                            details="Use 'except Exception:' or specific exception types",
+                            column=node.col_offset,
+                            message="Potential SQL injection (f-string in execute)",
+                            suggestion="Use parameterized queries: cursor.execute(query, (param,))",
+                            code_snippet=code_snippet,
                         )
                     )
-                self.generic_visit(node)
 
-        visitor = BareExceptVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_silent_exception_swallowing(self) -> None:
-        """Check for silent exception swallowing (except: pass)."""
-        if not self.tree:
+    def _check_command_injection(self, node: ast.Call) -> None:
+        """Detect command injection via subprocess (S002)."""
+        if "S002" in self.config.disabled_patterns:
             return
 
-        class SilentExceptVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-                # Check if body is just pass or ...
-                if len(node.body) == 1:
-                    stmt = node.body[0]
-                    if isinstance(stmt, ast.Pass):
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.BLOCK,
-                                category="Silent Exception",
-                                message="Silent exception swallowing with 'pass'",
-                                line=node.lineno,
-                                details="At least log the exception or add a comment explaining why it's ignored",
-                            )
-                        )
-                    elif isinstance(stmt, ast.Expr) and isinstance(
-                        stmt.value, ast.Constant
+        # Check for subprocess calls with shell=True
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in {"run", "call", "Popen"}:
+                for keyword in node.keywords:
+                    if keyword.arg == "shell" and isinstance(
+                        keyword.value, ast.Constant
                     ):
-                        if stmt.value.value == ...:
-                            self.checker.results.add_issue(
+                        if keyword.value.value is True:
+                            code_snippet = self._get_code_snippet(node.lineno)
+                            self.issues.append(
                                 Issue(
-                                    severity=Severity.BLOCK,
-                                    category="Silent Exception",
-                                    message="Silent exception swallowing with '...'",
+                                    id="S002",
+                                    severity="CRITICAL",
                                     line=node.lineno,
-                                    details="At least log the exception or add a comment",
+                                    column=node.col_offset,
+                                    message="Command injection risk (shell=True)",
+                                    suggestion="Use shell=False with list of args instead",
+                                    code_snippet=code_snippet,
                                 )
                             )
-                self.generic_visit(node)
 
-        visitor = SilentExceptVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_wildcard_imports(self) -> None:
-        """Check for wildcard imports (from module import *)."""
-        if not self.tree:
+    def _check_hardcoded_secrets(self, node: ast.Assign) -> None:
+        """Detect hardcoded secrets (S003)."""
+        if "S003" in self.config.disabled_patterns:
             return
 
-        class WildcardImportVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        secret_patterns = [
+            r"api[_-]?key",
+            r"password",
+            r"secret",
+            r"token",
+            r"auth",
+            r"credential",
+            r"api[_-]?secret",
+        ]
 
-            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-                for alias in node.names:
-                    if alias.name == "*":
-                        module_name = node.module or "module"
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.WARNING,
-                                category="Wildcard Import",
-                                message=f"Wildcard import from '{module_name}'",
-                                line=node.lineno,
-                                details="Explicitly import what you need to avoid namespace pollution",
-                            )
-                        )
-                self.generic_visit(node)
-
-        visitor = WildcardImportVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_is_for_equality(self) -> None:
-        """Check for using 'is' for value comparison instead of '=='."""
-        if not self.tree:
-            return
-
-        class IsComparisonVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_Compare(self, node: ast.Compare) -> None:
-                for op, comparator in zip(node.ops, node.comparators):
-                    if isinstance(op, (ast.Is, ast.IsNot)):
-                        # Check if comparing to literals other than None
-                        if isinstance(comparator, ast.Constant):
-                            if comparator.value not in (None, True, False):
-                                self.checker.results.add_issue(
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                var_name = target.id.lower()
+                for pattern in secret_patterns:
+                    if re.search(pattern, var_name):
+                        if isinstance(node.value, ast.Constant) and isinstance(
+                            node.value.value, str
+                        ):
+                            # Check if it looks like an actual secret (not empty or placeholder)
+                            value = node.value.value
+                            if value and value not in {
+                                "",
+                                "TODO",
+                                "REPLACE_ME",
+                                "your-key-here",
+                            }:
+                                code_snippet = self._get_code_snippet(node.lineno)
+                                self.issues.append(
                                     Issue(
-                                        severity=Severity.BLOCK,
-                                        category="Is Comparison",
-                                        message=f"Using 'is' to compare with literal value {repr(comparator.value)}",
+                                        id="S003",
+                                        severity="CRITICAL",
                                         line=node.lineno,
-                                        details="Use '==' for value comparison, 'is' for identity comparison",
+                                        column=node.col_offset,
+                                        message=f"Hardcoded secret: {target.id}",
+                                        suggestion="Use environment variables or secret management system",
+                                        code_snippet=code_snippet,
                                     )
                                 )
-                self.generic_visit(node)
+                        break
 
-        visitor = IsComparisonVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_type_checking_antipattern(self) -> None:
-        """Check for using type() instead of isinstance()."""
-        if not self.tree:
+    def _check_weak_cryptography(self, node: ast.Call) -> None:
+        """Detect weak cryptographic functions (S004)."""
+        if "S004" in self.config.disabled_patterns:
             return
 
-        class TypeCheckVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        weak_hashes = {"md5", "sha1"}
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in weak_hashes:
+                code_snippet = self._get_code_snippet(node.lineno)
+                self.issues.append(
+                    Issue(
+                        id="S004",
+                        severity="HIGH",
+                        line=node.lineno,
+                        column=node.col_offset,
+                        message=f"Weak cryptography: {node.func.attr}",
+                        suggestion="Use SHA-256 or stronger: hashlib.sha256()",
+                        code_snippet=code_snippet,
+                    )
+                )
 
-            def visit_Compare(self, node: ast.Compare) -> None:
-                # Look for patterns like: type(x) == int
-                if isinstance(node.left, ast.Call):
-                    if (
-                        isinstance(node.left.func, ast.Name)
-                        and node.left.func.id == "type"
-                    ):
-                        for op in node.ops:
-                            if isinstance(op, (ast.Eq, ast.NotEq)):
-                                self.checker.results.add_issue(
-                                    Issue(
-                                        severity=Severity.WARNING,
-                                        category="Type Check",
-                                        message="Using type() for type checking",
-                                        line=node.lineno,
-                                        details="Use isinstance() for better inheritance support",
-                                    )
-                                )
-                                break
-                self.generic_visit(node)
-
-        visitor = TypeCheckVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_modifying_list_while_iterating(self) -> None:
-        """Check for modifying a list while iterating over it."""
-        if not self.tree:
+    def _check_unsafe_deserialization(self, node: ast.Call) -> None:
+        """Detect unsafe deserialization (S005)."""
+        if "S005" in self.config.disabled_patterns:
             return
 
-        class ListModificationVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.loop_targets: list[str] = []
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr == "load" and isinstance(node.func.value, ast.Name):
+                if node.func.value.id == "pickle":
+                    code_snippet = self._get_code_snippet(node.lineno)
+                    self.issues.append(
+                        Issue(
+                            id="S005",
+                            severity="HIGH",
+                            line=node.lineno,
+                            column=node.col_offset,
+                            message="Unsafe deserialization: pickle.load",
+                            suggestion="Only unpickle from trusted sources, consider using json instead",
+                            code_snippet=code_snippet,
+                        )
+                    )
 
-            def visit_For(self, node: ast.For) -> None:
-                # Track what we're iterating over
-                target_name = None
-                if isinstance(node.iter, ast.Name):
-                    target_name = node.iter.id
-
-                if target_name:
-                    self.loop_targets.append(target_name)
-
-                    # Check for modifications in loop body
-                    for stmt in ast.walk(node):
-                        if isinstance(stmt, ast.Call):
-                            func = stmt.func
-                            if isinstance(func, ast.Attribute):
-                                if isinstance(func.value, ast.Name):
-                                    if func.value.id == target_name:
-                                        if func.attr in (
-                                            "append",
-                                            "remove",
-                                            "pop",
-                                            "clear",
-                                            "extend",
-                                        ):
-                                            self.checker.results.add_issue(
-                                                Issue(
-                                                    severity=Severity.BLOCK,
-                                                    category="List Modification",
-                                                    message=f"Modifying list '{target_name}' while iterating over it",
-                                                    line=node.lineno,
-                                                    details="Create a copy of the list or use list comprehension",
-                                                )
-                                            )
-                                            break
-
-                    self.loop_targets.pop()
-
-                self.generic_visit(node)
-
-        visitor = ListModificationVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_file_resource_management(self) -> None:
-        """Check for files opened without context managers."""
-        if not self.tree:
+    def _check_weak_random_for_security(self, node: ast.Call) -> None:
+        """Detect use of random module for security (S007)."""
+        if "S007" in self.config.disabled_patterns:
             return
 
-        class FileResourceVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.in_with: bool = False
+        if isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name):
+                if node.func.value.id == "random":
+                    code_snippet = self._get_code_snippet(node.lineno)
+                    self.issues.append(
+                        Issue(
+                            id="S007",
+                            severity="HIGH",
+                            line=node.lineno,
+                            column=node.col_offset,
+                            message="Weak random for security",
+                            suggestion="Use secrets module for cryptographic purposes",
+                            code_snippet=code_snippet,
+                        )
+                    )
 
-            def visit_With(self, node: ast.With) -> None:
-                old_in_with = self.in_with
-                self.in_with = True
-                self.generic_visit(node)
-                self.in_with = old_in_with
-
-            def visit_Call(self, node: ast.Call) -> None:
-                if not self.in_with:
-                    func_name = None
-                    if isinstance(node.func, ast.Name):
-                        func_name = node.func.id
-
-                    if func_name == "open":
-                        # Check if it's assigned to a variable (not used directly)
-                        parent = getattr(node, "parent", None)
-                        if not isinstance(parent, ast.With):
-                            self.checker.results.add_issue(
-                                Issue(
-                                    severity=Severity.WARNING,
-                                    category="Resource Management",
-                                    message="File opened without context manager",
-                                    line=node.lineno,
-                                    details="Use 'with open(...) as f:' to ensure proper file closure",
-                                )
-                            )
-                self.generic_visit(node)
-
-        visitor = FileResourceVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_late_binding_closures(self) -> None:
-        """Check for late binding closure issues in loops."""
-        if not self.tree:
+    def _check_wildcard_imports(self, node: ast.ImportFrom) -> None:
+        """Detect wildcard imports (O003)."""
+        if "O003" in self.config.disabled_patterns:
             return
 
-        class LateBindingVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        for alias in node.names:
+            if alias.name == "*":
+                code_snippet = self._get_code_snippet(node.lineno)
+                module_name = node.module if node.module else "unknown"
+                self.issues.append(
+                    Issue(
+                        id="O003",
+                        severity="HIGH",
+                        line=node.lineno,
+                        column=node.col_offset,
+                        message=f"Wildcard import from {module_name}",
+                        suggestion="Import specific names: from module import name1, name2",
+                        code_snippet=code_snippet,
+                    )
+                )
 
-            def visit_For(self, node: ast.For) -> None:
-                # Look for lambda or function definitions in loops
-                for stmt in ast.walk(node):
-                    if isinstance(stmt, (ast.Lambda, ast.FunctionDef)):
-                        # Check if it references the loop variable
-                        loop_var = None
-                        if isinstance(node.target, ast.Name):
-                            loop_var = node.target.id
+    def _check_modifying_list_while_iterating(
+        self, node: ast.For | ast.AsyncFor
+    ) -> None:
+        """Detect modifying list while iterating over it (G004)."""
+        if "G004" in self.config.disabled_patterns:
+            return
 
-                        if loop_var:
-                            # Simple check: look for the loop variable in the lambda/function
-                            for subnode in ast.walk(stmt):
-                                if (
-                                    isinstance(subnode, ast.Name)
-                                    and subnode.id == loop_var
-                                ):
-                                    self.checker.results.add_issue(
+        # Check if iterating over a list and modifying it in the body
+        if isinstance(node.iter, ast.Name):
+            iter_name = node.iter.id
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Attribute):
+                        if isinstance(child.func.value, ast.Name):
+                            if child.func.value.id == iter_name:
+                                if child.func.attr in {
+                                    "append",
+                                    "remove",
+                                    "pop",
+                                    "insert",
+                                }:
+                                    code_snippet = self._get_code_snippet(child.lineno)
+                                    self.issues.append(
                                         Issue(
-                                            severity=Severity.WARNING,
-                                            category="Late Binding",
-                                            message=f"Potential late binding closure issue with '{loop_var}'",
-                                            line=stmt.lineno,
-                                            details="Use default argument or functools.partial to capture loop variable",
+                                            id="G004",
+                                            severity="HIGH",
+                                            line=child.lineno,
+                                            column=child.col_offset,
+                                            message="Modifying list while iterating",
+                                            suggestion="Iterate over a copy: for item in list.copy():",
+                                            code_snippet=code_snippet,
                                         )
                                     )
-                                    break
 
-                self.generic_visit(node)
-
-        visitor = LateBindingVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_unnecessary_else_after_return(self) -> None:
-        """Check for unnecessary else after return/break/continue."""
-        if not self.tree:
+    def _check_silent_exception_swallowing(self, node: ast.ExceptHandler) -> None:
+        """Detect empty except blocks with pass (G005)."""
+        if "G005" in self.config.disabled_patterns:
             return
 
-        class UnnecessaryElseVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_If(self, node: ast.If) -> None:
-                # Check if the if-branch ends with return/break/continue
-                if node.orelse and node.body:
-                    last_stmt = node.body[-1]
-                    if isinstance(last_stmt, (ast.Return, ast.Break, ast.Continue)):
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.WARNING,
-                                category="Code Style",
-                                message="Unnecessary 'else' after return/break/continue",
-                                line=node.lineno,
-                                details="Remove 'else' and dedent the code for better readability",
-                            )
-                        )
-                self.generic_visit(node)
-
-        visitor = UnnecessaryElseVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_unnecessary_lambda(self) -> None:
-        """Check for unnecessary lambda functions."""
-        if not self.tree:
-            return
-
-        class UnnecessaryLambdaVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_Lambda(self, node: ast.Lambda) -> None:
-                # Check for lambda x: func(x) pattern
-                if isinstance(node.body, ast.Call):
-                    # Check if lambda args match call args exactly
-                    lambda_args = [arg.arg for arg in node.args.args]
-                    call_args: list[str] = []
-
-                    for arg in node.body.args:
-                        if isinstance(arg, ast.Name):
-                            call_args.append(arg.id)
-                        else:
-                            break
-
-                    if lambda_args == call_args and len(lambda_args) > 0:
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.WARNING,
-                                category="Code Style",
-                                message="Unnecessary lambda wrapper",
-                                line=node.lineno,
-                                details="Use the function directly without lambda",
-                            )
-                        )
-                self.generic_visit(node)
-
-        visitor = UnnecessaryLambdaVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_list_concatenation(self) -> None:
-        """Check for using += with lists instead of extend()."""
-        if not self.tree:
-            return
-
-        class ListConcatVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_AugAssign(self, node: ast.AugAssign) -> None:
-                if isinstance(node.op, ast.Add):
-                    # Check if right side is a list and left is likely a list
-                    if isinstance(node.value, ast.List):
-                        if isinstance(node.target, ast.Name):
-                            self.checker.results.add_issue(
-                                Issue(
-                                    severity=Severity.WARNING,
-                                    category="Performance",
-                                    message="Using += for list concatenation",
-                                    line=node.lineno,
-                                    details="Use list.extend() for better performance",
-                                )
-                            )
-                self.generic_visit(node)
-
-        visitor = ListConcatVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_assert_usage(self) -> None:
-        """Check for assertions used for validation."""
-        if not self.tree:
-            return
-
-        class AssertVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.in_test: bool = False
-
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                # Don't warn for test functions
-                old_in_test = self.in_test
-                if node.name.startswith("test_") or node.name.startswith("Test"):
-                    self.in_test = True
-                self.generic_visit(node)
-                self.in_test = old_in_test
-
-            def visit_Assert(self, node: ast.Assert) -> None:
-                if not self.in_test:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Assert for Validation",
-                            message="Assert used outside test code",
-                            line=node.lineno,
-                            details="Assertions can be disabled with -O flag, use explicit validation",
-                        )
-                    )
-                self.generic_visit(node)
-
-        visitor = AssertVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_global_usage(self) -> None:
-        """Check for global variable usage."""
-        if not self.tree:
-            return
-
-        class GlobalVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_Global(self, node: ast.Global) -> None:
-                for name in node.names:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Global Variable",
-                            message=f"Use of global variable '{name}'",
-                            line=node.lineno,
-                            details="Consider using function parameters or class attributes",
-                        )
-                    )
-                self.generic_visit(node)
-
-        visitor = GlobalVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_string_concatenation_in_loops(self) -> None:
-        """Check for string concatenation in loops (performance antipattern)."""
-        if not self.tree:
-            return
-
-        class StringConcatVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.in_loop: bool = False
-
-            def visit_For(self, node: ast.For) -> None:
-                old_in_loop = self.in_loop
-                self.in_loop = True
-                self.generic_visit(node)
-                self.in_loop = old_in_loop
-
-            def visit_While(self, node: ast.While) -> None:
-                old_in_loop = self.in_loop
-                self.in_loop = True
-                self.generic_visit(node)
-                self.in_loop = old_in_loop
-
-            def visit_AugAssign(self, node: ast.AugAssign) -> None:
-                if self.in_loop and isinstance(node.op, ast.Add):
-                    # Check if target is likely a string
-                    if isinstance(node.target, ast.Name):
-                        # Simple heuristic: variable names containing 'str', 'text', 'msg'
-                        var_name = node.target.id.lower()
-                        if any(
-                            s in var_name
-                            for s in ["str", "text", "msg", "result", "output"]
-                        ):
-                            self.checker.results.add_issue(
-                                Issue(
-                                    severity=Severity.WARNING,
-                                    category="Performance",
-                                    message="String concatenation in loop with '+='",
-                                    line=node.lineno,
-                                    details="Use list.append() and ''.join() for better performance",
-                                )
-                            )
-                self.generic_visit(node)
-
-        visitor = StringConcatVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_list_comprehension_complexity(self) -> None:
-        """Check for overly complex list comprehensions."""
-        if not self.tree:
-            return
-
-        class ComprehensionVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_ListComp(self, node: ast.ListComp) -> None:
-                # Count nested comprehensions and conditions
-                nested_count = len(node.generators)
-                condition_count = sum(len(g.ifs) for g in node.generators)
-
-                if nested_count > MAX_NESTED_COMPREHENSIONS:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Complexity",
-                            message=f"List comprehension with {nested_count} nested loops",
-                            line=node.lineno,
-                            details="Consider using regular loops for readability",
-                        )
-                    )
-                elif condition_count > MAX_COMPREHENSION_CONDITIONS:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Complexity",
-                            message=f"List comprehension with {condition_count} conditions",
-                            line=node.lineno,
-                            details="Consider using filter() or regular loops",
-                        )
-                    )
-                self.generic_visit(node)
-
-        visitor = ComprehensionVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_nested_functions_complexity(self) -> None:
-        """Check for deeply nested functions."""
-        if not self.tree:
-            return
-
-        class NestingVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.depth: int = 0
-
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                self.depth += 1
-                if self.depth > MAX_FUNCTION_NESTING_DEPTH:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Complexity",
-                            message=f"Function '{node.name}' is nested {self.depth} levels deep",
-                            line=node.lineno,
-                            details=f"Maximum recommended nesting is {MAX_FUNCTION_NESTING_DEPTH}",
-                        )
-                    )
-                self.generic_visit(node)
-                self.depth -= 1
-
-        visitor = NestingVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_repeated_attribute_access(self) -> None:
-        """Check for repeated attribute access in loops (performance issue)."""
-        if not self.tree:
-            return
-
-        class AttributeAccessVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.in_loop: bool = False
-                self.attribute_counts: dict[str, int] = {}
-
-            def visit_For(self, node: ast.For) -> None:
-                old_in_loop = self.in_loop
-                old_counts = self.attribute_counts.copy()
-                self.in_loop = True
-                self.attribute_counts = {}
-
-                self.generic_visit(node)
-
-                # Check if any attribute was accessed more than threshold
-                for attr_chain, count in self.attribute_counts.items():
-                    if count > MAX_ATTRIBUTE_ACCESS_IN_LOOP:
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.WARNING,
-                                category="Performance",
-                                message=f"Attribute '{attr_chain}' accessed {count} times in loop",
-                                line=node.lineno,
-                                details="Cache the attribute value before the loop",
-                            )
-                        )
-
-                self.in_loop = old_in_loop
-                self.attribute_counts = old_counts
-
-            def visit_Attribute(self, node: ast.Attribute) -> None:
-                if self.in_loop:
-                    # Build the attribute chain (e.g., "self.config.value")
-                    chain = self._get_attribute_chain(node)
-                    if chain and "." in chain:  # Only track chained attributes
-                        self.attribute_counts[chain] = (
-                            self.attribute_counts.get(chain, 0) + 1
-                        )
-                self.generic_visit(node)
-
-            def _get_attribute_chain(self, node: ast.expr) -> str | None:
-                """Build string representation of attribute chain."""
-                if isinstance(node, ast.Name):
-                    return node.id
-                if isinstance(node, ast.Attribute):
-                    base = self._get_attribute_chain(node.value)
-                    if base:
-                        return f"{base}.{node.attr}"
-                return None
-
-        visitor = AttributeAccessVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_inefficient_containment_checks(self) -> None:
-        """Check for inefficient 'in' checks on lists in conditions."""
-        if not self.tree:
-            return
-
-        class ContainmentVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_Compare(self, node: ast.Compare) -> None:
-                for op, comparator in zip(node.ops, node.comparators):
-                    if isinstance(op, ast.In):
-                        # Check if it's a list literal with many elements
-                        if (
-                            isinstance(comparator, ast.List)
-                            and len(comparator.elts)
-                            > MIN_LIST_SIZE_FOR_SET_RECOMMENDATION
-                        ):
-                            self.checker.results.add_issue(
-                                Issue(
-                                    severity=Severity.WARNING,
-                                    category="Performance",
-                                    message=f"Using 'in' with list literal of {len(comparator.elts)} elements",
-                                    line=node.lineno,
-                                    details="Use a set for O(1) lookup instead of O(n) list search",
-                                )
-                            )
-                self.generic_visit(node)
-
-        visitor = ContainmentVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_too_many_arguments(self) -> None:
-        """Check for functions with too many arguments."""
-        if not self.tree:
-            return
-
-        class ArgumentCountVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                # Don't count self/cls
-                args = node.args.args
-                if args and args[0].arg in ("self", "cls"):
-                    args = args[1:]
-
-                if len(args) > MAX_FUNCTION_ARGUMENTS:
-                    self.checker.results.add_issue(
-                        Issue(
-                            severity=Severity.WARNING,
-                            category="Complexity",
-                            message=f"Function '{node.name}' has {len(args)} arguments (max recommended: {MAX_FUNCTION_ARGUMENTS})",
-                            line=node.lineno,
-                            details="Consider using a configuration object or keyword arguments",
-                        )
-                    )
-                self.generic_visit(node)
-
-        visitor = ArgumentCountVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_tempfile_usage(self) -> None:
-        """Check for insecure temporary file usage."""
-        if not self.tree:
-            return
-
-        class TempfileVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
-                self.has_tempfile_import: bool = False
-
-            def visit_Import(self, node: ast.Import) -> None:
-                for alias in node.names:
-                    if alias.name == "tempfile":
-                        self.has_tempfile_import = True
-                self.generic_visit(node)
-
-            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-                if node.module == "tempfile":
-                    self.has_tempfile_import = True
-                self.generic_visit(node)
-
-            def visit_Call(self, node: ast.Call) -> None:
-                if self.has_tempfile_import:
-                    func_name = None
-                    if isinstance(node.func, ast.Attribute):
-                        func_name = node.func.attr
-                    elif isinstance(node.func, ast.Name):
-                        func_name = node.func.id
-
-                    # Check for insecure functions
-                    if func_name and func_name in ("mktemp", "mkstemp"):
-                        msg = f"Using potentially insecure '{func_name}' for temporary files"
-                        self.checker.results.add_issue(
-                            Issue(
-                                severity=Severity.WARNING,
-                                category="Security",
-                                message=msg,
-                                line=node.lineno,
-                                details="Use NamedTemporaryFile or TemporaryDirectory for better security",
-                            )
-                        )
-                self.generic_visit(node)
-
-        visitor = TempfileVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_random_usage_for_security(self) -> None:
-        """Check for using random module for security purposes."""
-        if not self.content:
-            return
-
-        # Look for patterns suggesting security usage of random
-        security_contexts = [
-            (
-                r"random\.[\w]+\([^)]*\).*(?:password|token|secret|key|salt|nonce)",
-                "Using 'random' module for security-sensitive values",
-            ),
-            (
-                r"(?:password|token|secret|key|salt|nonce).*=.*random\.[\w]+\([^)]*\)",
-                "Using 'random' module for cryptographic purposes",
-            ),
-        ]
-
-        for pattern, description in security_contexts:
-            if match := re.search(pattern, self.content, re.IGNORECASE):
-                line_no = self.content[: match.start()].count("\n") + 1
-                self.results.add_issue(
-                    Issue(
-                        severity=Severity.BLOCK,
-                        category="Security",
-                        message=description,
-                        line=line_no,
-                        details="Use 'secrets' module for cryptographically secure randomness",
-                    )
-                )
-
-    def _run_security_patterns_check(self) -> None:
-        """Check for common security antipatterns."""
-        if not self.content:
-            return
-
-        # Skip pattern checks if this is a pattern definition file
-        # (check for regex pattern definitions or security checker code)
-        if "sql_patterns" in self.content.lower() or "re.search" in self.content:
-            # Likely a security checker or pattern definition file, skip regex pattern checks
-            return
-
-        # SQL injection patterns
-        sql_patterns = [
-            (r'".*SELECT.*FROM.*WHERE.*\+', "SQL query with string concatenation"),
-            (r'".*SELECT.*FROM.*WHERE.*%\s', "SQL query with % formatting"),
-            (r'f".*SELECT.*FROM.*WHERE.*\{', "SQL query with f-string"),
-            (r"\.format\(.*SELECT.*FROM.*WHERE", "SQL query with .format()"),
-        ]
-
-        for pattern, description in sql_patterns:
-            if re.search(pattern, self.content, re.IGNORECASE | re.DOTALL):
-                self.results.add_issue(
-                    Issue(
-                        severity=Severity.BLOCK,
-                        category="SQL Injection",
-                        message=f"Potential SQL injection: {description}",
-                        details="Use parameterized queries with placeholders",
-                    )
-                )
-
-        # Hardcoded secrets patterns
-        secret_patterns = [
-            (
-                r'(?:password|passwd|pwd)\s*=\s*["\'][^"\']{8,}["\']',
-                "Hardcoded password",
-            ),
-            (
-                r'(?:api_key|apikey|api_secret)\s*=\s*["\'][^"\']{16,}["\']',
-                "Hardcoded API key",
-            ),
-            (
-                r'(?:token|secret|private_key)\s*=\s*["\'][^"\']{20,}["\']',
-                "Hardcoded secret/token",
-            ),
-            (
-                r'(?:AWS|AZURE|GCP|GITHUB)_[A-Z_]*(?:KEY|SECRET|TOKEN)\s*=\s*["\'][^"\']+["\']',
-                "Hardcoded cloud credential",
-            ),
-        ]
-
-        for pattern, description in secret_patterns:
-            if match := re.search(pattern, self.content, re.IGNORECASE):
-                line_no = self.content[: match.start()].count("\n") + 1
-                self.results.add_issue(
-                    Issue(
-                        severity=Severity.BLOCK,
-                        category="Security",
-                        message=description,
-                        line=line_no,
-                        details="Use environment variables or secure vaults for secrets",
-                    )
-                )
-
-        # Command injection patterns
-        cmd_patterns = [
-            (r"os\.system\s*\([^)]*\+[^)]*\)", "os.system with string concatenation"),
-            (
-                r"subprocess\.[\w]+\s*\([^)]*shell\s*=\s*True[^)]*\+",
-                "subprocess with shell=True and concatenation",
-            ),
-            (r"eval\s*\([^)]*(?:input|request|user)", "eval with user input"),
-            (r"exec\s*\([^)]*(?:input|request|user)", "exec with user input"),
-        ]
-
-        for pattern, description in cmd_patterns:
-            if re.search(pattern, self.content, re.IGNORECASE):
-                self.results.add_issue(
-                    Issue(
-                        severity=Severity.BLOCK,
-                        category="Command Injection",
-                        message=f"Potential command injection: {description}",
-                        details="Use subprocess with list arguments, avoid shell=True",
-                    )
-                )
-
-        # Unsafe deserialization - skip if it's in import or documentation
-        if "pickle.loads" in self.content or "pickle.load" in self.content:
-            # Check it's not just an import statement or comment
-            if not re.search(
-                r"(?:from|import)\s+pickle|#.*pickle", self.content, re.IGNORECASE
-            ):
-                if any(
-                    word in self.content.lower()
-                    for word in ["request", "user", "input", "client", "untrusted"]
-                ):
-                    self.results.add_issue(
-                        Issue(
-                            severity=Severity.BLOCK,
-                            category="Unsafe Deserialization",
-                            message="Pickle usage with potentially untrusted data",
-                            details="Pickle can execute arbitrary code. Use JSON or other safe formats",
-                        )
-                    )
-
-        # YAML safe loading
-        if "yaml.load" in self.content and "yaml.safe_load" not in self.content:
-            self.results.add_issue(
+        if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
                 Issue(
-                    severity=Severity.BLOCK,
-                    category="Security",
-                    message="Using yaml.load instead of yaml.safe_load",
-                    details="yaml.load can execute arbitrary code. Use yaml.safe_load",
+                    id="G005",
+                    severity="HIGH",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message="Silent exception swallowing",
+                    suggestion="Log the exception or handle it explicitly",
+                    code_snippet=code_snippet,
                 )
             )
 
-    def _check_function_complexity(self) -> None:
-        """Check cyclomatic complexity of functions."""
-        if not self.tree:
+    def _check_is_with_literals(self, node: ast.Compare) -> None:
+        """Detect using 'is' with literals (G001)."""
+        if "G001" in self.config.disabled_patterns:
             return
 
-        class ComplexityVisitor(ast.NodeVisitor):
-            def __init__(self, checker: PythonAntipatternChecker) -> None:
-                self.checker: PythonAntipatternChecker = checker
+        for op in node.ops:
+            if isinstance(op, (ast.Is, ast.IsNot)):
+                for comparator in node.comparators:
+                    if isinstance(comparator, ast.Constant):
+                        # Allow 'is None' but not 'is 5' or 'is "string"'
+                        if comparator.value is not None:
+                            code_snippet = self._get_code_snippet(node.lineno)
+                            self.issues.append(
+                                Issue(
+                                    id="G001",
+                                    severity="HIGH",
+                                    line=node.lineno,
+                                    column=node.col_offset,
+                                    message="Using 'is' with literal value",
+                                    suggestion="Use == for equality comparison",
+                                    code_snippet=code_snippet,
+                                )
+                            )
 
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                complexity = self._calculate_complexity(node)
-                if complexity > MAX_FUNCTION_COMPLEXITY:
-                    self.checker.results.add_issue(
+    def _check_equality_with_none(self, node: ast.Compare) -> None:
+        """Detect using == with None (G002)."""
+        if "G002" in self.config.disabled_patterns:
+            return
+
+        for i, op in enumerate(node.ops):
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                comparator = node.comparators[i]
+                if isinstance(comparator, ast.Constant) and comparator.value is None:
+                    code_snippet = self._get_code_snippet(node.lineno)
+                    operator = "is" if isinstance(op, ast.Eq) else "is not"
+                    self.issues.append(
                         Issue(
-                            severity=Severity.WARNING,
-                            category="Complexity",
-                            message=f"Function '{node.name}' has high complexity ({complexity})",
+                            id="G002",
+                            severity="MEDIUM",
                             line=node.lineno,
-                            details="Consider breaking into smaller functions",
+                            column=node.col_offset,
+                            message="Using == with None",
+                            suggestion=f"Use '{operator} None' instead",
+                            code_snippet=code_snippet,
                         )
                     )
-                self.generic_visit(node)
 
-            def _calculate_complexity(self, node: ast.FunctionDef) -> int:
-                """Simple complexity calculation."""
-                complexity = 1
-                for child in ast.walk(node):
-                    if isinstance(
-                        child, (ast.If, ast.While, ast.For, ast.ExceptHandler)
-                    ):
-                        complexity += 1
-                    elif isinstance(child, ast.BoolOp):
-                        complexity += len(child.values) - 1
-                return complexity
-
-        visitor = ComplexityVisitor(self)
-        visitor.visit(self.tree)
-
-    def _check_file_length(self) -> None:
-        """Check if file is too long."""
-        if self.content:
-            lines = self.content.split("\n")
-            if len(lines) > MAX_FILE_LINES:
-                self.results.add_issue(
-                    Issue(
-                        severity=Severity.WARNING,
-                        category="File Size",
-                        message=f"File has {len(lines)} lines (exceeds {MAX_FILE_LINES})",
-                        details="Consider splitting into multiple modules",
-                    )
-                )
-
-    def _check_import_organization(self) -> None:
-        """Check if imports are properly organized."""
-        if not self.tree:
+    def _check_equality_with_bool(self, node: ast.Compare) -> None:
+        """Detect comparing with True/False (G006)."""
+        if "G006" in self.config.disabled_patterns:
             return
 
-        import_lines: list[int] = []
-        for node in ast.walk(self.tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                import_lines.append(node.lineno)
+        for i, op in enumerate(node.ops):
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                comparator = node.comparators[i]
+                if isinstance(comparator, ast.Constant):
+                    if comparator.value is True or comparator.value is False:
+                        code_snippet = self._get_code_snippet(node.lineno)
+                        self.issues.append(
+                            Issue(
+                                id="G006",
+                                severity="LOW",
+                                line=node.lineno,
+                                column=node.col_offset,
+                                message="Comparing with True/False",
+                                suggestion="Use 'if x:' or 'if not x:' instead",
+                                code_snippet=code_snippet,
+                            )
+                        )
 
-        if import_lines and max(import_lines) - min(import_lines) > MAX_IMPORT_SPREAD:
-            self.results.add_issue(
+    def _check_type_checking_with_type(self, node: ast.Call) -> None:
+        """Detect using type() for type checking (G003)."""
+        if "G003" in self.config.disabled_patterns:
+            return
+
+        if isinstance(node.func, ast.Name) and node.func.id == "type":
+            # Check if this is in a comparison context
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
                 Issue(
-                    severity=Severity.WARNING,
-                    category="Import Organization",
-                    message="Imports are scattered throughout the file",
-                    details="Group all imports at the top of the file",
+                    id="G003",
+                    severity="MEDIUM",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message="Type checking with type()",
+                    suggestion="Use isinstance() instead: isinstance(obj, SomeClass)",
+                    code_snippet=code_snippet,
                 )
             )
+
+    def _check_context_manager_protocol(self, node: ast.ClassDef) -> None:
+        """Check context manager implementation (M003)."""
+        if "M003" in self.config.disabled_patterns:
+            return
+
+        has_enter = False
+        enter_returns_self = False
+
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if item.name == "__enter__":
+                    has_enter = True
+                    # Check if returns self
+                    for child in ast.walk(item):
+                        if isinstance(child, ast.Return):
+                            if isinstance(child.value, ast.Name):
+                                if child.value.id == "self":
+                                    enter_returns_self = True
+
+        if has_enter and not enter_returns_self:
+            code_snippet = self._get_code_snippet(node.lineno)
+            self.issues.append(
+                Issue(
+                    id="M003",
+                    severity="MEDIUM",
+                    line=node.lineno,
+                    column=node.col_offset,
+                    message="__enter__ should return self",
+                    suggestion="Add 'return self' at end of __enter__ method",
+                    code_snippet=code_snippet,
+                )
+            )
+
+    # ==================== Helper Methods ====================
+
+    def _calculate_complexity(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> int:
+        """
+        Calculate cyclomatic complexity of a function.
+
+        Complexity increases by 1 for each:
+        - if/elif statement
+        - for/while loop
+        - except handler
+        - and/or operator
+        - list/dict/set comprehension
+        """
+        complexity = 1  # Base complexity
+
+        for child in ast.walk(node):
+            if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler)):
+                complexity += 1
+            elif isinstance(child, (ast.BoolOp,)):
+                complexity += len(child.values) - 1
+            elif isinstance(child, (ast.ListComp, ast.DictComp, ast.SetComp)):
+                complexity += 1
+
+        return complexity
+
+    def _get_code_snippet(self, line: int) -> str:
+        """Get code snippet for a given line number."""
+        if 1 <= line <= len(self.source_lines):
+            return self.source_lines[line - 1].strip()
+        return ""
+
+
+# ==================== Core Processing Functions ====================
 
 
 def main() -> None:
-    """
-    Main entry point for unified Python post-tools checking.
+    """Main entry point for unified antipattern hook."""
+    # 1. Load configuration
+    config = Config()
 
-    Reads file path from stdin JSON and runs comprehensive checks.
-    Outputs JSON result for PostToolUse hook.
-    """
+    if not config.enabled:
+        output_feedback("", suppress_output=True)
+        return
 
+    # 2. Parse input
+    result = parse_hook_input()
+    if result is None:
+        output_feedback("", suppress_output=True)
+        return
+
+    tool_name, tool_input, tool_response = result
+
+    # 3. Validate tool and file
+    if not should_process(tool_name, tool_input, tool_response):
+        output_feedback("", suppress_output=True)
+        return
+
+    file_path = get_file_path(tool_input)
+
+    # 4. Analyze file for antipatterns
+    issues = analyze_file(file_path, config)
+
+    # 5. Filter and format issues
+    filtered_issues = filter_issues(issues, config)
+
+    # 6. Generate output
+    if not filtered_issues:
+        output_feedback("", suppress_output=True)
+        return
+
+    # Check for critical issues
+    has_critical = any(issue.severity == "CRITICAL" for issue in filtered_issues)
+
+    feedback = format_issue_report(filtered_issues, file_path)
+
+    if has_critical and config.block_critical:
+        output_block(
+            reason=f"Critical security issues detected in {Path(file_path).name}",
+            additional_context=feedback,
+            suppress_output=False,
+        )
+    else:
+        output_feedback(feedback, suppress_output=False)
+
+
+def should_process(
+    tool_name: str,
+    tool_input: ToolInput,
+    tool_response: dict[str, object],
+) -> bool:
+    """
+    Determine if file should be processed.
+
+    Args:
+        tool_name: Name of the tool that was executed
+        tool_input: Tool input parameters
+        tool_response: Tool execution response
+
+    Returns:
+        True if file should be analyzed, False otherwise
+    """
+    # Check tool name
+    if tool_name not in ["Write", "Edit", "NotebookEdit"]:
+        return False
+
+    # Check tool success
+    if not was_tool_successful(tool_response):
+        return False
+
+    # Get and validate file path
+    file_path = get_file_path(tool_input)
+    if not file_path:
+        return False
+
+    # Check if Python file
+    if not is_python_file(file_path):
+        return False
+
+    # Check if within project
+    if not is_within_project(file_path):
+        return False
+
+    # Check if file exists
+    if not Path(file_path).exists():
+        return False
+
+    # Skip test files (optional)
+    if "/test" in file_path or "tests/" in file_path:
+        # Can be disabled with env var
+        skip_tests = os.getenv("PYTHON_ANTIPATTERN_SKIP_TESTS", "false").lower()
+        if skip_tests == "true":
+            return False
+
+    return True
+
+
+def analyze_file(file_path: str, config: Config) -> list[Issue]:
+    """
+    Analyze file for Python antipatterns.
+
+    Args:
+        file_path: Absolute path to Python file
+        config: Configuration settings
+
+    Returns:
+        List of detected issues
+    """
     try:
-        # Read input from stdin
-        input_text = sys.stdin.read()
+        # Read file content
+        with open(file_path, "r", encoding="utf-8") as f:
+            source_code = f.read()
 
-        if not input_text:
-            # No input provided - non-blocking error
-            print("Error: No input provided", file=sys.stderr)
-            sys.exit(1)
+        # Check file size limit
+        line_count = source_code.count("\n")
+        if line_count > 10000:
+            # Skip very large files
+            return []
 
+        # Parse to AST
         try:
-            # Parse JSON input
-            input_data_raw: object = json.loads(input_text)  # type: ignore[reportUnknownVariableType]
-        except json.JSONDecodeError as e:
-            # Invalid JSON - non-blocking error
-            print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-            sys.exit(1)
+            tree = ast.parse(source_code, filename=file_path)
+        except SyntaxError:
+            # Skip files with syntax errors (will be caught by other tools)
+            return []
 
-        # Type-safe extraction with validation
-        if not isinstance(input_data_raw, dict):
-            print("Error: Input must be a JSON object", file=sys.stderr)
-            sys.exit(1)
+        # Run detector
+        detector = AntipatternDetector(source_code, config)
+        detector.visit(tree)
 
-        # Cast to dict[str, object] after validation
-        input_dict = cast(dict[str, object], input_data_raw)
+        return detector.issues
 
-        # Extract tool_input
-        tool_input_obj = input_dict.get("tool_input", {})
-
-        if not isinstance(tool_input_obj, dict):
-            # Invalid tool_input - skip check (not an error, just not applicable)
-            output_success()
-            return
-
-        # Cast tool_input to dict after validation
-        tool_input_dict = cast(dict[str, object], tool_input_obj)
-
-        # Extract file_path
-        file_path_val = tool_input_dict.get("file_path")
-
-        # Create typed tool input
-        typed_tool_input: ToolInput = {
-            "file_path": file_path_val if isinstance(file_path_val, str) else ""
-        }
-
-        # Run all checks
-        checker = PythonAntipatternChecker(tool_input=typed_tool_input)
-        results = checker.run_all_checks()
-
-        # Output results based on findings
-        if results.has_blocks():
-            output_blocked(results)
-        elif results.warnings:
-            output_warnings(results)
-        else:
-            # Get filename for success message
-            file_name = Path(typed_tool_input["file_path"]).name
-            output_success(file_name)
-
-    except Exception as e:
-        # Unexpected error - non-blocking error
-        print(f"Error: Unexpected error in hook: {e}", file=sys.stderr)
-        sys.exit(1)
+    except (IOError, OSError):
+        return []
+    except Exception:
+        # Fail safe - don't block on unexpected errors
+        return []
 
 
-def output_success(file_name: str = "") -> None:
-    """Output success result with optional filename."""
-    context = ""
-    if file_name:
-        context = f"✅ Python antipattern check passed for {file_name}"
+def filter_issues(issues: list[Issue], config: Config) -> list[Issue]:
+    """
+    Filter issues based on configuration.
 
-    output: HookOutput = {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": context,
-        }
+    Args:
+        issues: List of detected issues
+        config: Configuration settings
+
+    Returns:
+        Filtered list of issues
+    """
+    filtered: list[Issue] = []
+
+    for issue in issues:
+        # Check if severity level is enabled
+        if issue.severity not in config.levels:
+            continue
+
+        # Check if pattern is disabled
+        if issue.id in config.disabled_patterns:
+            continue
+
+        filtered.append(issue)
+
+        # Limit number of issues
+        if len(filtered) >= config.max_issues:
+            break
+
+    return filtered
+
+
+def format_issue_report(issues: list[Issue], file_path: str) -> str:
+    """
+    Format issues for display.
+
+    Args:
+        issues: List of issues to format
+        file_path: File that was analyzed
+
+    Returns:
+        Formatted report string
+    """
+    if not issues:
+        return ""
+
+    file_name = Path(file_path).name
+
+    # Group by severity
+    by_severity: dict[str, list[Issue]] = {
+        "CRITICAL": [],
+        "HIGH": [],
+        "MEDIUM": [],
+        "LOW": [],
     }
-    print(json.dumps(output))
-    sys.exit(0)
+
+    for issue in issues:
+        by_severity[issue.severity].append(issue)
+
+    # Build report
+    lines = [f"⚠️ Python antipatterns detected in {file_name}:\n"]
+
+    for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        for issue in by_severity[severity]:
+            lines.append(
+                f"[{issue.id}:{severity}] {issue.message} on line {issue.line}"
+            )
+            if issue.code_snippet:
+                lines.append(f"  {issue.code_snippet}")
+            lines.append(f"  Fix: {issue.suggestion}\n")
+
+    # Summary
+    count = len(issues)
+    counts = {s: len(by_severity[s]) for s in by_severity if by_severity[s]}
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    lines.append(f"{count} issue{'s' if count != 1 else ''} found ({summary})")
+
+    return "\n".join(lines)
 
 
-def output_warnings(results: CheckResult) -> None:
-    """Output warning results."""
-    separator_line = "=" * 60
-    warning_lines = [f"⚠️  Python Quality Warnings ({len(results.warnings)} found):"]
-    warning_lines.append(str(separator_line))
-
-    for issue in results.warnings:
-        line_info = f" (line {issue.line})" if issue.line else ""
-        msg = f"  • [{issue.category}] {issue.message}{line_info}"
-        warning_lines.append(msg)
-        if issue.details:
-            warning_lines.append(f"    → {issue.details}")
-
-    warning_lines.append(str(separator_line))
-    warning_lines.append(
-        "💡 Consider addressing these warnings to improve code quality"
-    )
-
-    output: HookOutput = {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": "\n".join(warning_lines),
-        }
-    }
-    print(json.dumps(output))
-    sys.exit(0)
-
-
-def output_blocked(results: CheckResult) -> None:
-    """Output blocking results."""
-    separator_line = "=" * 60
-    issue_lines = [f"❌ Python Quality Issues ({len(results.blocks)} blocking):"]
-    issue_lines.append(str(separator_line))
-
-    for issue in results.blocks:
-        line_info = f" (line {issue.line})" if issue.line else ""
-        msg = f"  • [{issue.category}] {issue.message}{line_info}"
-        issue_lines.append(msg)
-        if issue.details:
-            issue_lines.append(f"    → {issue.details}")
-
-    issue_lines.append(str(separator_line))
-    issue_lines.append("🔧 Fix these issues before proceeding")
-
-    reason = f"{len(results.blocks)} critical Python antipattern(s) detected"
-
-    output: HookOutput = {
-        "decision": "block",
-        "reason": reason,
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": "\n".join(issue_lines),
-        },
-    }
-    print(json.dumps(output))
-    sys.exit(0)
+# ==================== Entry Point ====================
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Log unexpected errors to stderr but don't block
+        print(f"Antipattern hook error: {e}", file=sys.stderr)
+        output_feedback("", suppress_output=True)

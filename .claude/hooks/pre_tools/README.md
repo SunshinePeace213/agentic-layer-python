@@ -1619,6 +1619,448 @@ The hook works on:
 
 ---
 
+### code_similarity_checking.py
+
+**Purpose**: Prevents creation of duplicate or versioned files by detecting similar functionality before allowing Write operations, encouraging Claude to use Edit tool and Git version control instead.
+
+**Hook Event**: PreToolUse
+**Monitored Tool**: Write
+**Version**: 1.0.0
+
+#### Why Use This Hook?
+
+During AI-assisted development, Claude Code may create multiple versions of the same file instead of updating existing files:
+
+- **Version Proliferation**: Files like `parser_v2.py`, `parser_v3.py`, `parser_final.py` accumulate
+- **Backup Clutter**: Unnecessary copies like `utils_copy.py`, `utils_backup.py` created
+- **Git Misuse**: Using filename versioning instead of proper Git commits
+- **Code Duplication**: Similar functionality spread across multiple files
+- **Maintenance Burden**: Bug fixes must be applied to multiple versions
+- **Confusion**: Developers unsure which version is current
+- **Technical Debt**: Versioned files become permanent clutter
+
+This hook detects when Claude attempts to create a file that appears to be a duplicate or version of an existing file, blocking the operation and encouraging proper practices.
+
+#### How It Works
+
+The hook intercepts Write operations and performs similarity analysis:
+
+1. **Pattern Detection**: Checks filename for versioning patterns (_v2, _copy, (1), etc.)
+2. **Directory Monitoring**: Only checks files in configured directories
+3. **Base File Search**: Finds potential source file (e.g., `parser.py` for `parser_v2.py`)
+4. **Content Similarity**: Compares file contents using difflib (if base file exists)
+5. **Threshold Comparison**: Applies configurable similarity thresholds
+6. **Educational Blocking**: Provides clear guidance on using Edit tool instead
+7. **Git Encouragement**: Reminds Claude to use Git for version control
+
+#### Detected Patterns
+
+**Version Suffix Patterns**:
+```python
+# Version numbers
+parser_v2.py, parser_v3.py        # Blocked if similar
+parser_version2.py                # Blocked if similar
+parser-v2.py, parser-2.py         # Blocked if similar
+
+# Numbered suffixes
+file_2.py, file-3.py              # Blocked if similar
+file (1).py, file (2).py          # Blocked if similar
+
+# Date suffixes
+utils_20240101.py                 # Blocked if similar
+config_2024_10_31.py              # Blocked if similar
+
+# Copy/backup suffixes
+parser_copy.py                    # Blocked if similar
+parser_backup.py                  # Blocked if similar
+parser_old.py                     # Blocked if similar
+parser_new.py                     # Blocked if similar
+parser_final.py                   # Blocked if similar
+```
+
+**Backup Extensions** (always checked):
+```python
+file.py.bak                       # Blocked if parser.py exists and similar
+file.py.old                       # Blocked if parser.py exists and similar
+file.py.orig                      # Blocked if parser.py exists and similar
+file.py~                          # Blocked if parser.py exists and similar
+```
+
+**Allowed Patterns** (never blocked):
+```python
+file.backup                       # Allowed (explicit .backup extension)
+file.py                          # Allowed (no version pattern)
+parser_utils.py                  # Allowed (not a version suffix)
+```
+
+#### Similarity Thresholds
+
+**High Similarity (>= 0.85)**: **DENY**
+```
+❌ BLOCKED: Code similarity detected!
+
+You are attempting to create: utils/parser_v2.py
+Similar file already exists: utils/parser.py
+Content similarity: 92%
+
+Instead of creating a new version:
+1. Use Edit tool to modify existing file directly
+2. Or use Git to manage versions:
+   git add utils/parser.py
+   git commit -m "Update parser logic"
+
+This promotes cleaner codebase and proper version control.
+```
+
+**Moderate Similarity (0.60-0.85)**: **ALLOW with WARNING**
+```
+⚠️ Warning: Moderate similarity detected (75%) with utils/parser.py
+Consider using Edit tool instead of creating new file.
+```
+
+**Low Similarity (< 0.60)**: **ALLOW** (silent)
+
+#### Examples
+
+**Blocked: High Similarity**:
+```python
+# Scenario: Claude tries to create parser_v2.py
+# parser.py already exists with 90% similar content
+
+# Hook Output:
+{
+  "permissionDecision": "deny",
+  "permissionReason": "Code similarity detected...",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionReason": "❌ BLOCKED: Code similarity detected!..."
+  }
+}
+
+# Result: Write operation blocked, Claude uses Edit instead
+```
+
+**Allowed: Different Content**:
+```python
+# Scenario: Claude creates parser_utils.py (helper module)
+# parser.py exists but content is completely different
+
+# Hook Output:
+{
+  "permissionDecision": "allow",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow"
+  }
+}
+
+# Result: Write operation allowed
+```
+
+**Allowed: Monitored Directory**:
+```python
+# Scenario: Claude creates script_v2.py in ./scripts/
+# Not in monitored directories list
+
+# Result: Hook skips checking, Write operation allowed
+```
+
+#### Configuration
+
+Hook registration in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/code_similarity_checking.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Environment Variables**:
+```bash
+# Enable/disable the hook
+CODE_SIMILARITY_ENABLED=true  # default: true
+
+# Similarity threshold for denial (0.0-1.0)
+CODE_SIMILARITY_DENY_THRESHOLD=0.85  # default: 0.85
+
+# Similarity threshold for warning (0.0-1.0)
+CODE_SIMILARITY_WARN_THRESHOLD=0.60  # default: 0.60
+
+# Monitored directories (colon-separated)
+CODE_SIMILARITY_DIRS="./src:./lib:./utils:./components"
+```
+
+**Default Monitored Directories**:
+```python
+./queries
+./utils
+./components
+./src
+./lib
+./services
+./models
+./handlers
+./.claude/hooks
+./tests
+```
+
+**Example Configurations**:
+
+Strict mode (block more aggressively):
+```bash
+export CODE_SIMILARITY_DENY_THRESHOLD=0.70
+export CODE_SIMILARITY_WARN_THRESHOLD=0.50
+```
+
+Lenient mode (only block very similar files):
+```bash
+export CODE_SIMILARITY_DENY_THRESHOLD=0.95
+export CODE_SIMILARITY_WARN_THRESHOLD=0.85
+```
+
+Monitor all directories:
+```bash
+export CODE_SIMILARITY_DIRS="."
+```
+
+#### Behavior Details
+
+**When Hook Triggers**:
+- Write tool attempts to create new file → Similarity check performed
+- File has version pattern → Search for base file
+- File in monitored directory → Content comparison
+- Similarity above threshold → Block with educational message
+
+**What Gets Checked**:
+- Files with version suffixes (_v2, _copy, etc.)
+- Files with backup extensions (.bak, .old, .orig, ~)
+- Files in monitored directories only
+- Files under 1 MB size (performance optimization)
+
+**What Gets Skipped**:
+- Files without version patterns (normal file creation)
+- Files with `.backup` extension (explicitly allowed)
+- Files outside monitored directories
+- Files over 1 MB (too large for quick checking)
+- Files when base file doesn't exist
+- Files when hook is disabled
+
+**Performance Optimizations**:
+1. **Quick Pre-Check**: Detects obviously different files by size
+2. **File Size Limit**: Skips files over 1 MB
+3. **Directory Filtering**: Only checks configured directories
+4. **Pattern Matching**: Fast regex-based version detection
+5. **Early Exit**: Returns immediately for non-versioned files
+
+#### Testing
+
+Run comprehensive test suite:
+```bash
+# Run all tests
+uv run pytest tests/claude_hook/pre_tools/test_code_similarity_checking.py -v
+
+# Run with coverage
+uv run pytest --cov=.claude/hooks/pre_tools/code_similarity_checking \
+  tests/claude_hook/pre_tools/test_code_similarity_checking.py
+
+# Run specific test
+uv run pytest tests/claude_hook/pre_tools/test_code_similarity_checking.py::test_blocks_high_similarity -v
+```
+
+Manual testing with hook input:
+```bash
+# Test blocking scenario
+echo '{
+  "session_id": "test",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "'$(pwd)'/utils/parser_v2.py",
+    "content": "def parse():\n    return data"
+  },
+  "cwd": "'$(pwd)'"
+}' | uv run .claude/hooks/pre_tools/code_similarity_checking.py
+```
+
+#### Performance
+
+- **Execution Time**: < 500ms for typical files (< 1000 lines)
+- **Memory Usage**: < 30 MB for typical comparisons
+- **File Size Limit**: 1 MB maximum for similarity checking
+- **Algorithm**: difflib.SequenceMatcher (optimized for text)
+- **Dependencies**: Zero external dependencies (stdlib only)
+
+**Optimization Strategies**:
+- Quick size-based pre-check before full comparison
+- Only checks monitored directories (not entire filesystem)
+- Caches directory listings (within single execution)
+- Early exit for files without version patterns
+- File size limit prevents memory issues
+
+#### Security
+
+- **Path Validation**: Uses pathlib for safe path operations
+- **Project Boundary**: Respects `$CLAUDE_PROJECT_DIR`
+- **Resource Limits**: 1 MB file size limit prevents DoS
+- **No Code Execution**: Only reads and compares file contents
+- **Error Isolation**: Exceptions don't crash Claude (fail-safe)
+- **Read-Only**: Never modifies existing files
+
+#### Integration with Other Tools
+
+**Complementary Hooks**:
+- **file_naming_enforcer**: Ensures proper file naming conventions
+- **pep8_naming_enforcer**: Validates Python naming in content
+- **tmp_creation_blocker**: Prevents temporary file creation
+
+**Git Workflow Integration**:
+```bash
+# Hook encourages this workflow:
+1. Edit existing file directly
+2. Commit changes to Git
+3. Use Git for version history
+
+# Instead of:
+1. Create parser_v2.py
+2. Create parser_v3.py
+3. Create parser_final.py
+```
+
+#### Known Limitations
+
+**False Positives** (similar files that should be separate):
+- Files with similar boilerplate (templates, configs)
+- Test files with similar setup code
+- Legitimately different implementations with same structure
+- Files that happen to match version pattern but aren't versions
+
+**Mitigation**:
+- Adjust thresholds: Lower DENY_THRESHOLD to be more lenient
+- Remove directory from monitoring: Update CODE_SIMILARITY_DIRS
+- Use allowed extensions: Name file with `.backup` extension
+- Temporarily disable: `export CODE_SIMILARITY_ENABLED=false`
+
+**False Negatives** (duplicate files not caught):
+- Files with different naming patterns (no version suffix)
+- Files in unmonitored directories
+- Files over 1 MB (skipped for performance)
+- Files with low textual similarity but same functionality
+
+**Cannot Detect**:
+- Semantic similarity (same logic, different code)
+- Refactored code (same behavior, different structure)
+- Cross-language duplicates (Python vs JavaScript)
+- Duplicates in external dependencies
+
+#### Troubleshooting
+
+**Hook blocking legitimate file creation**:
+- Check similarity score in error message
+- If false positive, adjust threshold: `export CODE_SIMILARITY_DENY_THRESHOLD=0.95`
+- Or remove directory from monitoring
+- Or use different filename (avoid version patterns)
+
+**Hook not blocking obvious duplicates**:
+- Verify file is in monitored directory: `echo $CODE_SIMILARITY_DIRS`
+- Check file has version pattern (must match regex)
+- Verify similarity is above threshold (>= 0.85 by default)
+- Enable hook if disabled: `export CODE_SIMILARITY_ENABLED=true`
+
+**Performance issues with large files**:
+- Hook automatically skips files > 1 MB
+- For smaller files, increase timeout in settings.json
+- Or exclude slow directories from monitoring
+
+**Hook always allows everything**:
+- Check CODE_SIMILARITY_ENABLED is not "false"
+- Verify monitored directories are configured correctly
+- Check filename matches version pattern
+- Ensure base file actually exists
+
+#### Use Cases
+
+**When This Hook Helps**:
+1. **Preventing Clutter**: Stops accumulation of versioned files
+2. **Enforcing Git**: Encourages proper version control usage
+3. **Code Review**: Catches unintentional duplicate creation
+4. **Onboarding**: Teaches new developers proper practices
+5. **Codebase Hygiene**: Maintains clean project structure
+
+**When to Disable**:
+1. **Legacy Migration**: When consolidating old versioned files
+2. **Rapid Prototyping**: When experimenting with variations
+3. **Template Generation**: When creating similar boilerplate
+4. **Backup Creation**: When intentionally making safety copies
+5. **Testing**: When testing the Write tool behavior
+
+#### Educational Value
+
+The hook teaches important software engineering practices:
+
+**Git Version Control**:
+```bash
+# ❌ Bad Practice (blocked by hook):
+- Create parser_v2.py with changes
+- Create parser_v3.py with more changes
+- Create parser_final.py
+
+# ✅ Good Practice (encouraged by hook):
+- Edit parser.py directly
+- git commit -m "Refactor parsing logic"
+- git commit -m "Add error handling"
+```
+
+**Direct File Updates**:
+```bash
+# ❌ Bad Practice:
+Write("utils/helper_copy.py", "modified code")
+
+# ✅ Good Practice:
+Edit("utils/helper.py", old="old code", new="modified code")
+```
+
+**Clean Codebase**:
+```
+# ❌ Before (cluttered):
+/utils/
+  parser.py
+  parser_v2.py
+  parser_v3.py
+  parser_copy.py
+  parser_backup.py
+  parser_final.py
+
+# ✅ After (clean):
+/utils/
+  parser.py
+
+# All versions tracked in Git:
+git log utils/parser.py
+```
+
+#### Related Documentation
+
+- [Specification](../../../specs/experts/cc_hook_expert/pre_tools/code_similarity_checking-spec.md)
+- [Test Suite](../../../tests/claude_hook/pre_tools/test_code_similarity_checking.py)
+- [Git Best Practices](https://git-scm.com/book/en/v2/Git-Basics-Recording-Changes-to-the-Repository)
+- [difflib Documentation](https://docs.python.org/3/library/difflib.html)
+
+---
+
 ## Shared Utilities
 
 All PreToolUse hooks share common utilities from the `utils/` directory:
