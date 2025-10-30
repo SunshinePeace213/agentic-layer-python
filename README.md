@@ -7,7 +7,7 @@ Moving towards from in-loop coding to out-loop coding, and aims to Zero Touch En
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - uv (Python package manager)
 - Claude Code Plan Subscription (provided by users)
 

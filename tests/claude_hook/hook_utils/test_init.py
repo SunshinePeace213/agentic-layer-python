@@ -11,12 +11,6 @@ Unit tests for utils package __init__.py
 Tests that the utils package properly exports all public APIs.
 """
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 
 def test_utils_package_imports_data_types():
     """Test that utils package exports data types."""

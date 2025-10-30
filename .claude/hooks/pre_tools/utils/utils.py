@@ -50,6 +50,24 @@ def parse_hook_input() -> Optional[Tuple[str, ToolInput]]:
         if isinstance(command_val, str):
             typed_tool_input["command"] = command_val
 
+    # Validate old_string is a string before adding (for Edit tool)
+    if "old_string" in tool_input_obj:
+        old_string_val: object = tool_input_obj["old_string"]  # type: ignore[reportUnknownVariableType]
+        if isinstance(old_string_val, str):
+            typed_tool_input["old_string"] = old_string_val
+
+    # Validate new_string is a string before adding (for Edit tool)
+    if "new_string" in tool_input_obj:
+        new_string_val: object = tool_input_obj["new_string"]  # type: ignore[reportUnknownVariableType]
+        if isinstance(new_string_val, str):
+            typed_tool_input["new_string"] = new_string_val
+
+    # Validate replace_all is a boolean before adding (for Edit tool)
+    if "replace_all" in tool_input_obj:
+        replace_all_val: object = tool_input_obj["replace_all"]  # type: ignore[reportUnknownVariableType]
+        if isinstance(replace_all_val, bool):
+            typed_tool_input["replace_all"] = replace_all_val
+
     return (tool_name, typed_tool_input)
 
 

@@ -1,11 +1,12 @@
 {
-    "include": ["src", ".claude"],
+    "include": ["src", ".claude", "tests"],
     "exclude": [
-      "**/node_modules", 
+      "**/node_modules",
       "**/__pycache__",
       "src/experimental",
       "src/typestubs"
     ],
+    "extraPaths": [".claude/hooks/pre_tools"],
     "pythonVersion": "3.12",
     "typeCheckingMode": "strict",
     

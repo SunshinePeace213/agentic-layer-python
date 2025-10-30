@@ -37,11 +37,6 @@ PATH_TO_SPEC: $ARGUMENTS
 │   │   │   ├── __init__.py          # Public API exports
 │   │   │   ├── data_types.py        # Centralized TypedDict definitions
 │   │   │   └── utils.py             # Shared parsing/output functions
-│   │   ├── tests/                   # Testing infrastructure
-│   │   │   ├── __init__.py
-│   │   │   ├── test_data_types.py   # Unit tests for data types
-│   │   │   ├── test_utils.py        # Unit tests for utilities
-│   │   │   └── test_integration.py  # Integration tests for hooks
 │   │   └── <new-hook-name>.py       # Individual hook implementations
 │   ├── post_tools/                  # Category of post tools hook
 │   ├── session_start/               # Category of session start hook
@@ -59,7 +54,8 @@ PATH_TO_SPEC: $ARGUMENTS
 specs/
 └── experts/
     └── cc_hook_expert/              # Hook specifications
-        └── <feature-name>-spec.md
+        └── <hook-event>/            # Hook Events
+            └── <feature-name>-spec.md 
 
 agents/                              # Hook output data
 ├── hook_logs/                       # Universal hook logs by session
@@ -67,15 +63,20 @@ agents/                              # Hook output data
 │       └── <HookEventName>.jsonl
 └── context_bundles/                 # Context tracking logs
     └── <DAY_HOUR>_<session-id>.jsonl
+   
+tests/                               # Unit Testing Infrastructure
+├── claude_hook/                     # Claude Code's Hooking Unit Testing
+│   └── <hook_event>/
+│       └── test_<feature-name>.py
 ```
 
 ### Hook Architecture in Our Codebase
 
 **File Structure Standards:**
-- `.claude/hooks/<category>/*.py` - All hook implementations live here as UV scripts
+- `.claude/hooks/<hook_event>/*.py` - All hook implementations live here as UV scripts
 - `.claude/settings.json` - Project-wide hook configurations (committed to git)
 - `.claude/settings.local.json` - Local overrides for individual developers (gitignored)
-- `specs/*-hook-spec.md` - Detailed specifications for hook features
+- `specs/experts/cc_hook_expert/<hook_event>/*-hook-spec.md` - Detailed specifications for hook features
 
 **Execution Model:**
 - All hooks execute via: `uv run $CLAUDE_PROJECT_DIR/.claude/hooks/<hook-name>.py`
@@ -129,6 +130,157 @@ agents/                              # Hook output data
      }
    }
    ```
+
+### Python Coding Standards & Best Practices
+
+Follow this recommended structure for Python modules to ensure clarity and maintainability:
+
+``` python
+"""Module docstring describing purpose and usage."""
+
+  # Standard library imports
+  import os
+  import sys
+
+  # Third-party imports
+  import requests
+  import numpy as np
+
+  # Local application imports
+  from .utils import helper_function
+
+  # Module-level constants (UPPER_CASE)
+  MAX_RETRIES = 3
+  DEFAULT_TIMEOUT = 30
+
+
+  def main() -> None:
+      """Main entry point of the script."""
+      first_thing_to_do()
+      second_thing_to_do()
+
+
+  def first_thing_to_do() -> None:
+      """Do the first thing."""
+      # Implementation
+
+
+  def second_thing_to_do() -> None:
+      """Do more stuff."""
+      # Implementation
+
+
+  if __name__ == "__main__":
+      main()
+```
+
+#### Class Organization
+
+Organize class members in this order for consistency and readability:
+``` python
+  class Something:
+      """Class docstring explaining purpose and usage.
+      
+      Attributes:
+          foo: Description of public attribute
+      """
+
+      # 1. Class variables
+      class_var = "shared across instances"
+
+      # 2. Magic/Dunder methods
+      def __init__(self, value: int) -> None:
+          """Initialize the instance.
+          
+          Args:
+              value: Initial value for internal state
+          """
+          self._value = value
+          self._some_preparation()
+
+      def __str__(self) -> str:
+          """String representation."""
+          return f"Something(foo={self.foo})"
+
+      def __repr__(self) -> str:
+          """Developer-friendly representation."""
+          return f"Something(_value={self._value})"
+
+      # 3. Properties (public interface)
+      @property
+      def foo(self) -> int:
+          """Get the foo value."""
+          return self._value
+
+      @foo.setter
+      def foo(self, value: int) -> None:
+          """Set the foo value with validation."""
+          if value < 0:
+              raise ValueError("foo must be non-negative")
+          self._value = value
+
+      # 4. Public methods (alphabetically ordered)
+      def process_data(self) -> None:
+          """Process data using internal state."""
+          self._validate()
+          self._execute()
+
+      # 5. Class methods
+      @classmethod
+      def from_string(cls, data: str) -> 'Something':
+          """Create instance from string representation.
+          
+          Args:
+              data: String to parse
+              
+          Returns:
+              New Something instance
+          """
+          value = int(data)
+          return cls(value)
+
+      # 6. Static methods
+      @staticmethod
+      def validate_input(value: int) -> bool:
+          """Validate input value.
+          
+          Args:
+              value: Value to validate
+              
+          Returns:
+              True if valid, False otherwise
+          """
+          return value >= 0
+
+      # 7. Private methods (prefixed with _)
+      def _some_preparation(self) -> None:
+          """Internal preparation logic."""
+          # Setup code
+          pass
+
+      def _execute(self) -> None:
+          """Execute internal operations."""
+          pass
+
+      def _validate(self) -> None:
+          """Validate internal state."""
+          if not self.validate_input(self._value):
+              raise ValueError("Invalid internal state")
+```
+
+#### Key Principles
+
+1. Type Hints: Use type annotations for function parameters and return values
+2. Docstrings: Document all public modules, classes, functions, and methods
+3. Naming Conventions:
+    - snake_case for functions, methods, variables
+    - PascalCase for classes
+    - UPPER_CASE for constants
+    - _leading_underscore for private/internal members
+4. Import Organization: Group imports (standard library → third-party → local)
+5. Class Member Order: Follow the order shown above for predictable code structure
+6. Single Responsibility: Each function/class should have one clear purpose
+7. DRY Principle: Don't Repeat Yourself - extract common logic into reusable functions
 
 ### Hook Event Behaviors
 
@@ -191,8 +343,9 @@ agents/                              # Hook output data
 3. **Review Existing Infrastructure**
    - Check .claude/settings.json for current configurations
    - Review .claude/settings.local.json if present
-   - Examine .claude/hooks/*.py for patterns and conventions
+   - Examine .claude/hooks/<hook_event>/*.py for patterns and conventions
    - Inspect .claude/hooks/<hooks_category>/utils for shared utilities
+   - Review ai_docs/claude-built-in-tools.md for existing available tools and its specs
    - Note integration points and dependencies
 
 4. **Execute Plan-Driven Implementation**
@@ -254,12 +407,18 @@ agents/                              # Hook output data
    - Test edge cases and error conditions
    - Validate Claude Code integration
 
-   **Code Standards Checking**
-   Conduct comprehensive checking including the source code and testing script though following methods: 
-   - Ruff Checking (python lint library via UV)
-   - basedpyright (python type checking library via UV) and config file is pyrightconfig.json
-    - Should not contain any typing error even the minor error until no error on typing checking stage
-   - vulture (python dead code checking library via UV)
+  **Code Standards Checking**
+  Perform comprehensive code quality checks on all source code and test files using the following tools (all via UV):
+    - **Ruff**: Run linting checks to ensure code style compliance
+    - **basedpyright**: Perform strict type checking (configured via `pyrightconfig.json`)
+        - All code must pass type checking with zero errors or warnings
+        - This applies to both source code and test files
+        - No typing issues should remain, regardless of severity
+    - **vulture**: Scan for dead/unused code
+    **Requirements:**
+        - All checks must pass with zero errors before completion
+        - Fix any issues identified by these tools
+        - Re-run checks after fixes to verify resolution
    
 8. **Verify Integration**
    - Test hook triggers in actual Claude Code sessions

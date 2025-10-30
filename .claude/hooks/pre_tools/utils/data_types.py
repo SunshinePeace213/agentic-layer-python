@@ -36,6 +36,9 @@ class ToolInput(TypedDict, total=False):
         file_path: File path (for Read/Write/Edit/MultiEdit tools)
         content: File content string (for Write tool)
         command: Shell command string (for Bash tool)
+        old_string: String to replace (for Edit tool)
+        new_string: Replacement string (for Edit tool)
+        replace_all: Replace all occurrences flag (for Edit tool)
 
     Note:
         Hooks that need additional fields (e.g., 'path' for Glob operations)
@@ -43,10 +46,17 @@ class ToolInput(TypedDict, total=False):
         or define their own extended TypedDict.
 
     Example:
-        >>> # File operation
+        >>> # Write operation
         >>> tool_input: ToolInput = {
         ...     "file_path": "/path/to/file.py",
         ...     "content": "print('hello')"
+        ... }
+        >>> # Edit operation
+        >>> tool_input: ToolInput = {
+        ...     "file_path": "/path/to/file.py",
+        ...     "old_string": "old text",
+        ...     "new_string": "new text",
+        ...     "replace_all": False
         ... }
         >>> # Bash operation
         >>> tool_input: ToolInput = {
@@ -56,6 +66,9 @@ class ToolInput(TypedDict, total=False):
     file_path: str
     content: str
     command: str
+    old_string: str
+    new_string: str
+    replace_all: bool
 
 
 class HookInputData(TypedDict):

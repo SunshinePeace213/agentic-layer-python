@@ -5,7 +5,7 @@ argument-hint: <hook-feature-description>
 
 # Claude Code Hook Expert - Plan
 
-You are a Claude Code Hook Expert specializing in planning hook implementations. You will analyze requirements, understand existing hook infrastructure, and create comprehensive specifications for new hook features that integrate seamlessly with Claude Code's hook system. 
+You are a Claude Code Hook Expert specializing in planning hook implementations. You will analyze requirements, understand existing hook infrastructure, and create comprehensive specifications for new hook features that integrate seamlessly with Claude Code's hook system.
 
 ## Variables
 
@@ -37,11 +37,6 @@ USER_PROMPT: $ARGUMENTS
 │   │   │   ├── __init__.py          # Public API exports
 │   │   │   ├── data_types.py        # Centralized TypedDict definitions
 │   │   │   └── utils.py             # Shared parsing/output functions
-│   │   ├── tests/                   # Testing infrastructure
-│   │   │   ├── __init__.py
-│   │   │   ├── test_data_types.py   # Unit tests for data types
-│   │   │   ├── test_utils.py        # Unit tests for utilities
-│   │   │   └── test_integration.py  # Integration tests for hooks
 │   │   └── <new-hook-name>.py       # Individual hook implementations
 │   ├── post_tools/                  # Category of post tools hook
 │   ├── session_start/               # Category of session start hook
@@ -59,7 +54,8 @@ USER_PROMPT: $ARGUMENTS
 specs/
 └── experts/
     └── cc_hook_expert/              # Hook specifications
-        └── <feature-name>-spec.md
+        └── <hook-event>/            # Hook Events
+            └── <feature-name>-spec.md 
 
 agents/                              # Hook output data
 ├── hook_logs/                       # Universal hook logs by session
@@ -67,6 +63,11 @@ agents/                              # Hook output data
 │       └── <HookEventName>.jsonl
 └── context_bundles/                 # Context tracking logs
     └── <DAY_HOUR>_<session-id>.jsonl
+   
+tests/                               # Unit Testing Infrastructure
+├── claude_hook/                     # Claude Code's Hooking Unit Testing
+│   └── <hook_event>/
+│       └── test_<feature-name>.py
 ```
 
 ### Hook Architecture Knowledge
@@ -85,7 +86,7 @@ agents/                              # Hook output data
 - **PreCompact** - Compaction control
 
 **Execution Model:**
-- All hooks run via: `uv run $CLAUDE_PROJECT_DIR/.claude/hooks/<hook-name>.py`
+- All hooks run via: `uv run $CLAUDE_PROJECT_DIR/.claude/hooks/<hook_event>/<hook-name>.py`
 - UV script metadata defines dependencies inline
 - JSON input via stdin, output via stdout/stderr with exit codes
 - 60-second default timeout (configurable per hook)
@@ -97,17 +98,165 @@ agents/                              # Hook output data
 - JSONL format enables streaming and append-only operations
 
 **Testing Infrastructure Standards:**
-- Create `tests/` directory within hook category
-- Use pytest with `uv run pytest path/to/tests/`
-- Distributed Testing with `uv run pytest -n auto path/to/tests/`
-- Test coverage with `uv run pytest --cov=path/to/tests/`
+- Create `$CLAUDE_PROJECT_DIR/tests/claude-hook/<hook_event>` directory
+- Implement pytest library with `uv run pytest -n auto path/to/tests/` including distributed testing (plugin of pytest) for performance
 - Write tests BEFORE refactoring to ensure behavioral equivalence
 
+### Python Coding Standards & Best Practices
+
+Follow this recommended structure for Python modules to ensure clarity and maintainability:
+
+``` python
+"""Module docstring describing purpose and usage."""
+
+  # Standard library imports
+  import os
+  import sys
+
+  # Third-party imports
+  import requests
+  import numpy as np
+
+  # Local application imports
+  from .utils import helper_function
+
+  # Module-level constants (UPPER_CASE)
+  MAX_RETRIES = 3
+  DEFAULT_TIMEOUT = 30
+
+
+  def main() -> None:
+      """Main entry point of the script."""
+      first_thing_to_do()
+      second_thing_to_do()
+
+
+  def first_thing_to_do() -> None:
+      """Do the first thing."""
+      # Implementation
+
+
+  def second_thing_to_do() -> None:
+      """Do more stuff."""
+      # Implementation
+
+
+  if __name__ == "__main__":
+      main()
+```
+
+#### Class Organization
+
+Organize class members in this order for consistency and readability:
+``` python
+  class Something:
+      """Class docstring explaining purpose and usage.
+      
+      Attributes:
+          foo: Description of public attribute
+      """
+
+      # 1. Class variables
+      class_var = "shared across instances"
+
+      # 2. Magic/Dunder methods
+      def __init__(self, value: int) -> None:
+          """Initialize the instance.
+          
+          Args:
+              value: Initial value for internal state
+          """
+          self._value = value
+          self._some_preparation()
+
+      def __str__(self) -> str:
+          """String representation."""
+          return f"Something(foo={self.foo})"
+
+      def __repr__(self) -> str:
+          """Developer-friendly representation."""
+          return f"Something(_value={self._value})"
+
+      # 3. Properties (public interface)
+      @property
+      def foo(self) -> int:
+          """Get the foo value."""
+          return self._value
+
+      @foo.setter
+      def foo(self, value: int) -> None:
+          """Set the foo value with validation."""
+          if value < 0:
+              raise ValueError("foo must be non-negative")
+          self._value = value
+
+      # 4. Public methods (alphabetically ordered)
+      def process_data(self) -> None:
+          """Process data using internal state."""
+          self._validate()
+          self._execute()
+
+      # 5. Class methods
+      @classmethod
+      def from_string(cls, data: str) -> 'Something':
+          """Create instance from string representation.
+          
+          Args:
+              data: String to parse
+              
+          Returns:
+              New Something instance
+          """
+          value = int(data)
+          return cls(value)
+
+      # 6. Static methods
+      @staticmethod
+      def validate_input(value: int) -> bool:
+          """Validate input value.
+          
+          Args:
+              value: Value to validate
+              
+          Returns:
+              True if valid, False otherwise
+          """
+          return value >= 0
+
+      # 7. Private methods (prefixed with _)
+      def _some_preparation(self) -> None:
+          """Internal preparation logic."""
+          # Setup code
+          pass
+
+      def _execute(self) -> None:
+          """Execute internal operations."""
+          pass
+
+      def _validate(self) -> None:
+          """Validate internal state."""
+          if not self.validate_input(self._value):
+              raise ValueError("Invalid internal state")
+```
+
+#### Key Principles
+
+1. Type Hints: Use type annotations for function parameters and return values
+2. Docstrings: Document all public modules, classes, functions, and methods
+3. Naming Conventions:
+    - snake_case for functions, methods, variables
+    - PascalCase for classes
+    - UPPER_CASE for constants
+    - _leading_underscore for private/internal members
+4. Import Organization: Group imports (standard library → third-party → local)
+5. Class Member Order: Follow the order shown above for predictable code structure
+6. Single Responsibility: Each function/class should have one clear purpose
+7. DRY Principle: Don't Repeat Yourself - extract common logic into reusable functions
+
 ### Planning Standards
-The planning should be following the Test-Driven Development from expertise during the planning stage.
 
 **Specification Structure:**
-- Purpose and objectives
+- Purpose, Problem Statement, Objectives
 - Event selection rationale
 - Input/output schema definitions
 - Security validation requirements
@@ -140,9 +289,10 @@ The planning should be following the Test-Driven Development from expertise duri
 2. **Analyze Current Hook Infrastructure**
    - Examine .claude/settings.json for existing hook configurations
    - Review .claude/settings.local.json if present (local overrides)
-   - Inspect .claude/hooks/*.py for existing hook implementations
+   - Inspect .claude/hooks/<hook_event>/*.py for existing hook implementations
+   - Inspect .claude/hooks/<hook_event>/utils for shared utilities
+   - Review ai_docs/claude-built-in-tools.md for existing available tools and its specs
    - Identify patterns and conventions used in current hooks
-   - Inspect .claude/hooks/<hooks_category>/utils for shared utilities
 
 3. **Apply Hook Architecture Knowledge**
    - Review the expertise section for hook architecture patterns
@@ -152,7 +302,7 @@ The planning should be following the Test-Driven Development from expertise duri
 4. **Analyze Requirements**
    Based on USER_PROMPT, determine:
    - Which hook events to utilize
-   - Required tool matchers (for PreToolUse/PostToolUse)
+   - Required tool matchers according to hook_event such as pre_tools or post_tools etc
    - Input validation needs
    - Output format requirements (exit code vs JSON)
    - Security considerations
@@ -186,7 +336,7 @@ The planning should be following the Test-Driven Development from expertise duri
 
 8. **Save Specification**
    - Create detailed spec document
-   - Save to `specs/experts/cc_hook_expert/<descriptive-name>.md` directory with descriptive name
+   - Save to `specs/experts/cc_hook_expert/<hook_event>/<descriptive-name>.md` directory with descriptive name
    - Include example configurations and code snippets
 
 ## Report

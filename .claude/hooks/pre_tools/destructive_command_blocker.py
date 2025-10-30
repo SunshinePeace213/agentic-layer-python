@@ -4,423 +4,467 @@
 # dependencies = []
 # ///
 """
-Destructive Command Blocker - PreToolUse Hook
-==============================================
-Prevents execution of dangerous bash commands to protect against data loss.
+Destructive Command Blocker Hook
+==================================
 
-This hook validates bash commands before execution to block potentially
-destructive operations that could cause system damage, data loss, or
-security vulnerabilities.
+Prevents execution of dangerous bash commands in Claude Code during development
+by validating bash commands before execution to protect against accidental system damage.
 
-Categories of Blocked Commands:
-1. Destructive file operations (rm -rf /, etc.)
-2. Disk overwrite operations (dd to block devices)
-3. Fork bombs
-4. Dangerous permission changes (chmod 777 on system files)
-5. System file overwrites (redirects to /etc/, etc.)
-6. Format operations (mkfs, fdisk, etc.)
-7. Critical process termination (kill -9 systemd)
-8. Remote code execution (curl | bash)
+Purpose:
+    Block potentially destructive bash commands that could cause:
+    - Permanent data loss
+    - System instability
+    - Security compromises
+    - Irreversible system damage
 
-Usage:
-    This hook is automatically invoked by Claude Code before Bash tool execution.
-    It receives JSON input via stdin and outputs JSON permission decisions.
+Hook Event: PreToolUse
+Monitored Tool: Bash
+
+Output:
+    - JSON with permissionDecision ("allow" or "deny")
+    - Educational error messages with safe alternatives
 
 Dependencies:
-    - Python >= 3.12
-    - No external packages (standard library only)
-    - Shared utilities from .claude/hooks/pre_tools/utils/
-
-Exit Codes:
-    0: Success (decision output via stdout)
+    - Python 3.12+
+    - Standard library only
+    - Shared utilities from .claude/hooks/pre_tools/utils
 
 Author: Claude Code Hook Expert
 Version: 1.0.0
+Last Updated: 2025-10-30
 """
 
 import re
 import sys
-from typing import Optional, Pattern, Tuple
+from pathlib import Path
+from typing import Optional
 
-# Import shared utilities
-try:
-    from .utils import parse_hook_input, output_decision
-except ImportError:
-    from utils import parse_hook_input, output_decision
+# Add parent directory to Python path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+from utils import parse_hook_input, output_decision
 
 
-# ============ Pattern Definitions ============
+# ==================== Dangerous Command Patterns ====================
 
-# Critical Paths (protected directories)
-CRITICAL_PATHS: list[str] = [
-    "/", "/*", "/bin", "/boot", "/etc", "/lib", "/lib64",
-    "/proc", "/root", "/sbin", "/sys", "/usr", "~", "$HOME"
+# Category 1: Destructive File Operations
+DESTRUCTIVE_FILE_PATTERNS = [
+    # Recursive deletion of root or system directories
+    (r'\brm\s+.*-[rf]+.*\s+/', "rm -rf with root path"),
+    (r'\brm\s+-[rf]+\s+/', "rm -rf of root"),
+    (r'\brm\s+.*-[rf]+.*\s+/\s*$', "rm -rf ending with root"),
+    (r'\brm\s+.*-[rf]+.*\s+/\w+', "rm -rf of system directory"),
+
+    # Deletion of home directory
+    (r'\brm\s+.*-[rf]+.*\s+~/', "rm -rf of home directory"),
+
+    # Deletion of all files
+    (r'\brm\s+.*-[rf]+.*\s+\*', "rm -rf with wildcard"),
+    (r'\brm\s+-[rf]+\s+\.\*', "rm -rf of dot files"),
+
+    # Critical system directories
+    (r'\brm\s+.*-[rf]+.*/(?:bin|boot|dev|etc|lib|proc|root|sbin|sys|usr|var)\b',
+     "rm -rf of system directory"),
 ]
 
-SYSTEM_DIRS_PATTERN: Pattern[str] = re.compile(
-    r'/(bin|boot|dev|etc|lib|lib64|proc|root|sbin|sys|usr)(/|$)'
-)
+# Category 2: Disk Overwrite Operations
+DISK_OVERWRITE_PATTERNS = [
+    # Direct disk writes
+    (r'>\s*/dev/(?:sd[a-z]|hd[a-z]|nvme\d+n\d+|disk\d+)', "write to disk device"),
+    (r'\bdd\s+.*of=/dev/(?:sd[a-z]|hd[a-z]|nvme\d+n\d+|disk\d+)', "dd to disk device"),
 
-# Compiled regex patterns for performance
-RM_DESTRUCTIVE: Pattern[str] = re.compile(
-    r'\brm\s+.*?(-[rf]{1,2}|-[fr]{1,2}|--recursive|--force).*?\s+(~/?|/\*?(\s|$)|\$HOME/?|/bin\b|/boot\b|/etc\b|/usr\b|/sys\b|/sbin\b|/lib\b|/root\b|/proc\b)',
-    re.IGNORECASE
-)
+    # Random data overwrites
+    (r'/dev/(?:zero|random|urandom)\s*>\s*/dev/(?:sd|hd|nvme|disk)',
+     "overwrite disk with random"),
 
-DD_DISK_WRITE: Pattern[str] = re.compile(
-    r'\bdd\s+.*?of=/dev/(sd[a-z]|hd[a-z]|nvme\d+n\d+|disk\d+)',
-    re.IGNORECASE
-)
+    # Disk device manipulation
+    (r'\b(?:cat|tee)\s+.*>\s*/dev/(?:sd[a-z]|hd[a-z]|nvme\d+n\d+)',
+     "write to disk via cat/tee"),
+]
 
-FORK_BOMB: Pattern[str] = re.compile(
-    r':\(\)\{:\|:&\};:|(\$0\s*&\s*){2,}'
-)
+# Category 3: Fork Bombs
+FORK_BOMB_PATTERNS = [
+    # Classic fork bombs
+    (r':\(\)\{.*:\|:.*\}.*;:', "bash fork bomb"),
+    (r'\(\)\s*\{\s*\(\)\s*\|\s*\(\)\s*&\s*\}', "function fork bomb"),
 
-CHMOD_DANGEROUS: Pattern[str] = re.compile(
-    r'\bchmod\s+(-R\s+)?[67][67][67]\s+(/|/etc|/usr|/bin|/boot)',
-    re.IGNORECASE
-)
+    # Perl/Python fork bombs
+    (r'perl.*fork.*while', "perl fork bomb"),
+    (r'python.*os\.fork.*while', "python fork bomb"),
 
-SYSTEM_FILE_REDIRECT: Pattern[str] = re.compile(
-    r'>\s*/(etc|boot|sys|proc)/\S+',
-    re.IGNORECASE
-)
+    # Recursive process spawning
+    (r'\$0\s*&\s*\$0', "recursive script execution"),
+]
 
-FORMAT_OPERATION: Pattern[str] = re.compile(
-    r'\b(mkfs[\.\w]*|fdisk|parted|wipefs)\s+/dev/',
-    re.IGNORECASE
-)
+# Category 4: Dangerous Permission Changes
+PERMISSION_PATTERNS = [
+    # World-writable sensitive directories
+    (r'\bchmod\s+.*777\s+/(?:etc|bin|sbin|boot|usr)', "chmod 777 on system directory"),
 
-KILL_CRITICAL: Pattern[str] = re.compile(
-    r'\b(killall|pkill)\s+-9\s+\*|kill\s+-9\s+1\b|\bkillall.*systemd|pkill.*systemd',
-    re.IGNORECASE
-)
+    # Recursive permission changes on root
+    (r'\bchmod\s+.*-R.*\s+/', "recursive chmod on root"),
+    (r'\bchown\s+.*-R.*\s+/', "recursive chown on root"),
 
-PIPE_TO_SHELL: Pattern[str] = re.compile(
-    r'(wget|curl)\s+.*\|\s*(sh|bash)',
-    re.IGNORECASE
-)
+    # SUID/SGID on dangerous locations
+    (r'\bchmod\s+.*[24][0-9]{3}\s+/', "SUID/SGID on system files"),
+]
+
+# Category 5: System File Overwriting
+SYSTEM_FILE_PATTERNS = [
+    # Critical system files
+    (r'>\s*/(?:etc/(?:passwd|shadow|group|sudoers|fstab|hosts))',
+     "overwrite system config"),
+    (r'>\s*/boot/', "overwrite boot files"),
+
+    # System binaries (redirect)
+    (r'>\s*/(?:bin|sbin|usr/bin|usr/sbin)/', "overwrite system binaries"),
+
+    # System binaries (copy operations)
+    (r'\b(?:cp|mv)\s+.*\s+/(?:bin|sbin|usr/bin|usr/sbin)/',
+     "copy to system binaries"),
+
+    # Kernel/system files
+    (r'>\s*/proc/', "write to proc filesystem"),
+    (r'>\s*/sys/', "write to sys filesystem"),
+]
+
+# Category 6: Format Operations
+FORMAT_PATTERNS = [
+    # Filesystem creation (formatting) - must be on device, not file
+    (r'\bmkfs\.(?:ext[234]|xfs|btrfs|ntfs|fat32)\s+/dev/', "format filesystem"),
+    (r'\bmke2fs\s+/dev/', "ext filesystem format"),
+
+    # Partition manipulation
+    (r'\b(?:fdisk|parted|gparted|diskutil)\b', "partition tool"),
+
+    # Disk erasure
+    (r'\bshred\s+.*--remove', "secure file deletion"),
+    (r'\bwipe\s+', "secure wipe command"),
+]
+
+# Category 7: Critical Process Termination
+PROCESS_KILL_PATTERNS = [
+    # Kill all processes
+    (r'\bkillall\s+-9', "killall with SIGKILL"),
+    (r'\bkill\s+.*-9\s+1\b', "kill init/systemd"),
+
+    # Kill critical services
+    (r'\bkill(?:all)?\s+.*\b(?:systemd|init|launchd|sshd|networkd)\b',
+     "kill critical service"),
+
+    # pkill dangerous patterns
+    (r'\bpkill\s+-9', "pkill with SIGKILL"),
+]
+
+# Category 8: Additional Dangerous Commands
+ADDITIONAL_DANGEROUS_PATTERNS = [
+    # Kernel module manipulation
+    (r'\b(?:rmmod|modprobe|insmod)\b', "kernel module manipulation"),
+
+    # System shutdown/reboot
+    (r'\b(?:shutdown|reboot|halt|poweroff|init\s+[06])\b', "system shutdown"),
+
+    # Memory/system information exposure
+    (r'/dev/mem', "direct memory access"),
+    (r'/dev/kmem', "kernel memory access"),
+
+    # Cryptocurrency miners (CPU exhaustion)
+    (r'\b(?:xmrig|minerd|cpuminer|ethminer)\b', "cryptocurrency miner"),
+
+    # Network flooding/attacks
+    (r'\bhping3\b.*--flood', "network flood attack"),
+    (r'\bnmap\b.*-sS.*-p-', "aggressive port scan"),
+
+    # System configuration corruption
+    (r'\bsysctl\s+.*kernel\.panic', "kernel panic trigger"),
+]
+
+# Organize all patterns by category
+DANGEROUS_PATTERNS = {
+    "Destructive File Operations": DESTRUCTIVE_FILE_PATTERNS,
+    "Disk Overwrite Operations": DISK_OVERWRITE_PATTERNS,
+    "Fork Bombs": FORK_BOMB_PATTERNS,
+    "Dangerous Permission Changes": PERMISSION_PATTERNS,
+    "System File Overwriting": SYSTEM_FILE_PATTERNS,
+    "Format Operations": FORMAT_PATTERNS,
+    "Critical Process Termination": PROCESS_KILL_PATTERNS,
+    "Additional Dangerous Commands": ADDITIONAL_DANGEROUS_PATTERNS,
+}
 
 
-# ============ Detection Functions ============
+# ==================== Allow-list Patterns ====================
 
-def detect_destructive_rm(command: str) -> Optional[Tuple[str, str]]:
+ALLOWED_PATTERNS = [
+    # Safe rm with confirmation
+    r'\brm\s+.*-i',  # Interactive mode (prompts for confirmation)
+
+    # Help/version queries (read-only)
+    r'\b(?:rm|dd|chmod|kill)\s+(?:--help|-h|--version|-V)\b',
+
+    # Man pages (documentation)
+    r'\bman\s+(?:rm|dd|chmod|kill)',
+
+    # Dry-run/preview modes
+    r'\b\w+\s+.*(?:--dry-run|--simulate|-n)\b',
+
+    # Project-local operations only
+    r'^\s*rm\s+.*\./[^/]',  # rm starting with ./
+]
+
+
+# ==================== Category-Specific Messages ====================
+
+CATEGORY_MESSAGES = {
+    "Destructive File Operations": {
+        "danger": """  - Attempts to recursively delete large portions of the filesystem
+  - Will destroy critical system files and data
+  - Results in permanent, irreversible data loss
+  - Can make the system completely unbootable
+  - No recovery possible without backups""",
+        "alternatives": """  - Delete specific files: rm file.txt
+  - Delete with confirmation: rm -i unwanted_files
+  - Delete project files only: rm -r ./old_project/
+  - Preview deletion: ls -R directory_to_delete/"""
+    },
+    "Disk Overwrite Operations": {
+        "danger": """  - Directly writes to disk devices, bypassing filesystem
+  - Can corrupt or destroy entire disk partitions
+  - Will erase all data on affected disks
+  - May make system completely unbootable
+  - Typically requires privileged access but extremely dangerous""",
+        "alternatives": """  - Create disk images: dd if=/dev/zero of=./file.img
+  - Use filesystem tools: rsync, cp, mv
+  - Backup before operations: Always backup first
+  - Test in virtual machines: Practice with VMs first"""
+    },
+    "Fork Bombs": {
+        "danger": """  - Creates exponentially growing processes
+  - Will exhaust all system resources (CPU, memory, PIDs)
+  - Makes system completely unresponsive
+  - Requires hard reboot to recover
+  - Can cause data loss in running applications""",
+        "alternatives": """  - Use loops with limits: for i in {1..10}; do ...; done
+  - Use process pools: xargs -P 4
+  - Use proper background jobs: command &
+  - Use job control: bg, fg, jobs"""
+    },
+    "Dangerous Permission Changes": {
+        "danger": """  - Compromises system security by making files world-writable
+  - Can allow unauthorized access to sensitive system files
+  - May enable privilege escalation attacks
+  - Recursive changes affect entire directory trees
+  - Difficult to reverse once applied""",
+        "alternatives": """  - Set specific permissions: chmod 755 ./script.sh
+  - Minimal required permissions: chmod 644 ./config.txt
+  - Change project ownership only: chown user:group ./project/
+  - Use ACLs for complex permissions: setfacl"""
+    },
+    "System File Overwriting": {
+        "danger": """  - Overwrites critical system configuration files
+  - Can compromise system authentication and security
+  - May render system unbootable
+  - Corrupts kernel and boot files
+  - Requires system reinstallation to recover""",
+        "alternatives": """  - Write to project directories: echo "data" > ./config.txt
+  - Use proper configuration tools: sudoedit, visudo
+  - Create local config files: ./local/config
+  - Never redirect to system directories"""
+    },
+    "Format Operations": {
+        "danger": """  - Formats disks and partitions, erasing all data
+  - Destroys filesystem structure permanently
+  - All files on affected partitions are lost
+  - No recovery possible after formatting
+  - Can affect system boot partitions""",
+        "alternatives": """  - Format disk images: mkfs.ext4 ./disk.img
+  - Use cloud storage for data
+  - Backup before formatting: Always backup first
+  - Test with virtual disks first"""
+    },
+    "Critical Process Termination": {
+        "danger": """  - Kills essential system processes
+  - Can make system unstable or unresponsive
+  - May cause data loss in running applications
+  - System services may not restart properly
+  - Could require system reboot""",
+        "alternatives": """  - Kill specific processes: kill 12345
+  - Graceful termination: kill -TERM process_name
+  - Kill user apps only: killall myapp
+  - Check before killing: ps aux | grep process_name"""
+    },
+    "Additional Dangerous Commands": {
+        "danger": """  - Can compromise system stability and security
+  - May exhaust system resources
+  - Could enable network attacks
+  - Difficult or impossible to reverse
+  - May violate security policies""",
+        "alternatives": """  - Use proper system tools
+  - Test in isolated environments
+  - Consult documentation first
+  - Consider safer alternatives"""
+    }
+}
+
+
+# ==================== Validation Logic ====================
+
+
+def is_allowed_command(command: str) -> bool:
     """
-    Detect destructive rm operations.
+    Check if command matches allow-list patterns.
 
     Args:
-        command: The bash command to validate
+        command: Bash command to check
 
     Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
+        True if command is explicitly allowed, False otherwise
+
+    Examples:
+        >>> is_allowed_command("rm --help")
+        True
+        >>> is_allowed_command("rm -i file.txt")
+        True
+        >>> is_allowed_command("rm -rf /")
+        False
     """
-    if RM_DESTRUCTIVE.search(command):
-        return (
-            "destructive_file_deletion",
-            """🚫 CRITICAL: Destructive file deletion blocked
-
-This command would recursively delete critical files/directories.
-
-Safer alternatives:
-  - Delete specific files: rm specific-file.txt
-  - Use trash/recycle: trash {path}
-  - Create backup first: tar -czf backup.tar.gz {path}
-  - Test with ls first: ls {path}
-
-Always verify paths before deletion!"""
-        )
-    return None
+    for pattern in ALLOWED_PATTERNS:
+        try:
+            if re.search(pattern, command, re.IGNORECASE):
+                return True
+        except re.error:
+            # Regex error: skip this pattern
+            continue
+    return False
 
 
-def detect_dd_disk_write(command: str) -> Optional[Tuple[str, str]]:
+def format_deny_message(command: str, category: str, description: str) -> str:
     """
-    Detect dd operations writing to disk devices.
+    Format comprehensive denial message with explanation and alternatives.
 
     Args:
-        command: The bash command to validate
+        command: The dangerous command that was blocked
+        category: Category of dangerous command
+        description: Pattern description that matched
 
     Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
+        Formatted error message with educational content
     """
-    if DD_DISK_WRITE.search(command):
-        return (
-            "disk_overwrite",
-            """🚫 CRITICAL: Disk overwrite operation blocked
+    messages = CATEGORY_MESSAGES.get(category, {
+        "danger": "  - This command could cause system damage",
+        "alternatives": "  - Use safer alternatives"
+    })
 
-This dd command would overwrite a disk device, causing data loss.
+    message = f"""⚠️ BLOCKED: Dangerous command detected
+
+Command: {command}
+Category: {category}
+Pattern: {description}
 
 Why this is dangerous:
-  - Overwrites entire disk/partition
-  - Cannot be undone
-  - Destroys all data on the device
-
-Safe dd usage:
-  - Write to regular files: dd if=source of=backup.img
-  - Always verify 'of=' parameter
-  - Use 'count=' and 'bs=' for safety"""
-        )
-    return None
-
-
-def detect_fork_bomb(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect fork bomb patterns.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if FORK_BOMB.search(command):
-        return (
-            "fork_bomb",
-            """🚫 CRITICAL: Fork bomb detected
-
-This command creates infinite processes, freezing your system.
-
-Impact:
-  - Exhausts all process slots
-  - Makes system unresponsive
-  - Requires hard reboot
-
-If you need parallel processing:
-  - Use xargs: cat list.txt | xargs -P 4 -I {} command {}
-  - Use GNU parallel: parallel command ::: arg1 arg2
-  - Use proper job control"""
-        )
-    return None
-
-
-def detect_dangerous_chmod(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect dangerous permission changes.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if CHMOD_DANGEROUS.search(command):
-        return (
-            "dangerous_permissions",
-            """🚫 Dangerous permission change blocked
-
-This command would change permissions on critical system files.
-
-Why this is dangerous:
-  - 777 makes files world-writable (security risk)
-  - System files need specific permissions
-  - Can break system functionality
-
-Safe practices:
-  - Use minimal permissions: chmod 644 file.txt
-  - Only modify your own files
-  - Avoid recursive changes on system paths"""
-        )
-    return None
-
-
-def detect_system_file_overwrite(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect system file overwrites.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if SYSTEM_FILE_REDIRECT.search(command):
-        return (
-            "system_file_overwrite",
-            """🚫 System file overwrite blocked
-
-This command would overwrite critical system files.
-
-Protected directories:
-  - /etc/     (system configuration)
-  - /boot/    (bootloader)
-  - /sys/     (kernel interface)
-  - /proc/    (process information)
-
-If you need to modify system files:
-  - Create a backup first
-  - Use proper editing tools (sudoedit)
-  - Test in a container/VM"""
-        )
-    return None
-
-
-def detect_format_operation(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect disk format operations.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if FORMAT_OPERATION.search(command):
-        return (
-            "format_operation",
-            """🚫 CRITICAL: Disk format operation blocked
-
-This command would format a disk, destroying all data.
-
-Why this is blocked:
-  - Formats entire disk/partition
-  - Permanent data loss
-  - Cannot be undone
-
-For safe storage operations:
-  - Work with disk images: mkfs.ext4 disk.img
-  - Use containers/VMs for testing
-  - Always verify device names"""
-        )
-    return None
-
-
-def detect_critical_process_kill(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect critical process termination.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if KILL_CRITICAL.search(command):
-        return (
-            "critical_process_kill",
-            """🚫 Critical process termination blocked
-
-This would kill critical system processes.
-
-Why this is dangerous:
-  - May kill init/systemd (crash system)
-  - May kill SSH/network (lose remote access)
-  - SIGKILL (-9) prevents cleanup
-
-Safe process management:
-  - Use SIGTERM first: kill {pid}
-  - Target specific processes by PID
-  - Avoid wildcards with killall
-  - Check processes first: ps aux | grep {name}"""
-        )
-    return None
-
-
-def detect_pipe_to_shell(command: str) -> Optional[Tuple[str, str]]:
-    """
-    Detect piping remote content to shell.
-
-    Args:
-        command: The bash command to validate
-
-    Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
-    """
-    if PIPE_TO_SHELL.search(command):
-        return (
-            "remote_code_execution",
-            """🚫 Remote code execution blocked
-
-This command downloads and executes untrusted code.
-
-Why this is dangerous:
-  - Executes code without review
-  - No security validation
-  - Potential malware/backdoors
+{messages["danger"]}
 
 Safe alternatives:
-  - Download first: wget URL -O script.sh
-  - Review content: cat script.sh
-  - Then execute: bash script.sh"""
-        )
-    return None
+{messages["alternatives"]}
+
+If you absolutely must run this command:
+  1. Exit Claude Code
+  2. Run the command manually in a terminal
+  3. Understand the risks fully before proceeding
+
+This protection exists to prevent accidental system damage."""
+
+    return message
 
 
-# ============ Main Validation ============
-
-def validate_command(command: str) -> Optional[Tuple[str, str]]:
+def validate_bash_command(command: str) -> Optional[str]:
     """
-    Validate command against all dangerous patterns.
-
-    Checks command against all detection patterns in order of severity.
-    Returns immediately upon finding first match (short-circuit evaluation).
+    Validate bash command for dangerous patterns.
 
     Args:
-        command: The bash command to validate
+        command: Bash command to validate
 
     Returns:
-        Tuple of (violation_type, message) if dangerous, None otherwise
+        None if safe, error message string if dangerous
+
+    Examples:
+        >>> validate_bash_command("ls -la")
+        None
+        >>> validate_bash_command("rm -rf /")
+        '⚠️ BLOCKED: Dangerous command detected...'
     """
-    # Check all patterns in order of severity
-    checks = [
-        detect_fork_bomb,              # Critical
-        detect_dd_disk_write,          # Critical
-        detect_format_operation,       # Critical
-        detect_destructive_rm,         # Critical
-        detect_system_file_overwrite,  # High
-        detect_dangerous_chmod,        # High
-        detect_critical_process_kill,  # Medium-High
-        detect_pipe_to_shell,          # Medium-High
-    ]
+    if not command:
+        return None
 
-    for check in checks:
-        result = check(command)
-        if result:
-            return result
+    try:
+        # Step 1: Check allow-list (early return for safe patterns)
+        if is_allowed_command(command):
+            return None
 
-    return None
+        # Step 2: Check each dangerous pattern category
+        for category, patterns in DANGEROUS_PATTERNS.items():
+            for pattern, description in patterns:
+                try:
+                    if re.search(pattern, command, re.IGNORECASE):
+                        return format_deny_message(command, category, description)
+                except re.error:
+                    # Regex error for this pattern: skip it
+                    continue
+
+        # Step 3: No dangerous patterns found
+        return None
+
+    except Exception:
+        # Any other error: fail-safe, allow
+        return None
+
+
+# ==================== Main Entry Point ====================
 
 
 def main() -> None:
     """
-    Main entry point for destructive command blocker hook.
+    Main hook execution logic.
 
-    Reads JSON input from stdin, validates bash commands, and outputs
-    permission decisions. Implements fail-safe behavior on errors.
+    Process:
+        1. Parse input from stdin
+        2. Extract tool name and command
+        3. Validate command for dangerous patterns
+        4. Output decision (allow or deny)
 
-    Exit Codes:
-        0: Always (decision output via stdout)
+    Error Handling:
+        All exceptions result in "allow" decision (fail-safe)
     """
     try:
-        # Parse input using shared utility
-        parsed = parse_hook_input()
-        if not parsed:
+        # Parse input from stdin
+        result = parse_hook_input()
+        if result is None:
+            # Parse failed, fail-safe: allow
             output_decision("allow", "Failed to parse input (fail-safe)")
             return
 
-        tool_name, tool_input = parsed
+        tool_name, tool_input = result
 
-        # Only validate Bash commands
+        # Only process Bash commands
         if tool_name != "Bash":
             output_decision("allow", "Not a Bash command")
             return
 
         # Extract command
         command = tool_input.get("command", "")
-        if not command:
-            output_decision("allow", "No command to validate")
-            return
 
         # Validate command
-        violation = validate_command(command)
+        error_message = validate_bash_command(command)
 
-        if violation:
-            _, message = violation
-            full_message = f"{message}\n\nCommand: {command}"
-            output_decision("deny", full_message, suppress_output=True)
+        # Output decision
+        if error_message:
+            # Dangerous command detected: deny with educational message
+            output_decision("deny", error_message, suppress_output=True)
         else:
+            # Command is safe: allow
             output_decision("allow", "Command is safe")
 
     except Exception as e:
-        # Fail-safe: allow operation on error
+        # Unexpected error: fail-safe, allow operation
         print(f"Destructive command blocker error: {e}", file=sys.stderr)
         output_decision("allow", f"Hook error (fail-safe): {e}")
 
