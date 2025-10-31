@@ -16,12 +16,20 @@
         "extraPaths": [".claude/hooks/pre_tools"]
       },
       {
+        "root": "tests/claude_hook/logging",
+        "extraPaths": [".claude/hooks/logging"]
+      },
+      {
         "root": ".claude/hooks/post_tools",
         "extraPaths": [".claude/hooks/post_tools"]
       },
       {
         "root": ".claude/hooks/pre_tools",
         "extraPaths": [".claude/hooks/pre_tools"]
+      },
+      {
+        "root": ".claude/hooks/logging",
+        "extraPaths": [".claude/hooks/logging"]
       }
     ],
     "pythonVersion": "3.12",

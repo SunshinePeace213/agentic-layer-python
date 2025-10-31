@@ -2061,6 +2061,458 @@ git log utils/parser.py
 
 ---
 
+### lint_arg_pytest.py
+
+**Purpose**: Enforces standardized pytest execution patterns by validating that pytest commands include performance-optimizing and coverage-tracking arguments during Claude Code development.
+
+**Hook Event**: PreToolUse
+**Monitored Tool**: Bash
+**Version**: 1.0.0
+
+#### Why Use This Hook?
+
+Direct usage of `pytest` without optimization arguments creates several critical issues in development and CI/CD:
+
+- **Performance Degradation**: Running tests sequentially instead of in parallel wastes CPU resources and CI/CD time
+- **Missing Coverage Data**: Tests run without coverage tracking provide no code quality insights
+- **Inconsistent Practices**: Different test invocations lead to unpredictable results across team members
+- **Wasted Resources**: Single-threaded execution underutilizes available CPU cores
+- **Incomplete Validation**: No coverage metrics means code quality can degrade unnoticed
+- **Workflow Confusion**: Mixing different pytest invocation styles creates unclear best practices
+
+This hook ensures all pytest commands use `-n auto` for parallel execution and `--cov` for coverage tracking, maintaining high-performance testing standards.
+
+#### How It Works
+
+The hook intercepts Bash tool operations and validates pytest commands:
+
+1. **Parse Command**: Splits command into segments to handle chains, pipes, and compound commands
+2. **Detect Pytest**: Identifies pytest invocations (direct, UV-wrapped, or Python module)
+3. **Check Allow-List**: Informational commands (--help, --version, --collect-only) are immediately allowed
+4. **Validate Arguments**: Checks for required `-n auto` and `--cov` arguments
+5. **Provide Alternatives**: Returns specific corrected command examples when blocking
+
+#### Detected Command Patterns
+
+**Blocked pytest Commands**:
+```bash
+# Missing both arguments
+pytest tests/
+pytest -v tests/
+
+# Missing parallel execution
+pytest --cov=. tests/
+pytest --cov=src tests/
+
+# Missing coverage tracking
+pytest -n auto tests/
+pytest -n 4 tests/
+
+# UV-wrapped but missing arguments
+uv run pytest tests/
+```
+
+**Allowed Commands**:
+```bash
+# Optimized pytest with both required arguments
+pytest -n auto --cov=. tests/
+pytest -n 4 --cov=src --cov-report=term tests/
+uv run pytest -n auto --cov=. tests/
+
+# Informational commands (no execution)
+pytest --help
+pytest --version
+pytest -V
+pytest --collect-only
+pytest --fixtures
+pytest --markers
+pytest --cache-show
+
+# Non-pytest commands
+git status
+npm test
+uv run python script.py
+```
+
+#### Required Arguments
+
+**Parallel Execution (pytest-xdist)**:
+```bash
+-n auto                      # Use all available CPU cores (recommended)
+-n 4                         # Use specific number of cores
+--numprocesses=auto          # Long-form alternative
+--numprocesses=4             # Long-form with specific count
+```
+
+**Coverage Tracking (pytest-cov)**:
+```bash
+--cov                        # Track coverage for all files
+--cov=.                      # Track coverage for current directory
+--cov=src                    # Track coverage for specific directory
+--cov-report=term            # Add terminal coverage report
+--cov-report=html            # Generate HTML coverage report
+```
+
+#### Examples
+
+**Blocked Operations**:
+```bash
+# Missing both arguments
+pytest tests/
+# ❌ Blocked: Use 'pytest -n auto --cov=. tests/'
+
+# Missing parallel execution only
+pytest --cov=. tests/
+# ❌ Blocked: Use 'pytest -n auto --cov=. tests/'
+
+# Missing coverage only
+pytest -n auto tests/
+# ❌ Blocked: Use 'pytest -n auto --cov=. tests/'
+
+# UV-wrapped but unoptimized
+uv run pytest tests/
+# ❌ Blocked: Use 'uv run pytest -n auto --cov=. tests/'
+```
+
+**Allowed Operations**:
+```bash
+# Optimized pytest
+pytest -n auto --cov=. tests/
+# ✅ Allowed: Has both required arguments
+
+# With additional options
+pytest -n auto --cov=. --cov-report=term -v tests/
+# ✅ Allowed: Optimization arguments present
+
+# UV-wrapped and optimized
+uv run pytest -n auto --cov=. tests/
+# ✅ Allowed: Proper UV + optimization
+
+# Help commands
+pytest --help
+# ✅ Allowed: Informational command
+
+# Non-pytest commands
+git status
+# ✅ Allowed: Not a pytest command
+```
+
+#### Error Messages
+
+When an unoptimized pytest command is detected, you'll see a context-specific error message:
+
+**Missing Both Arguments**:
+```
+🚫 Blocked: Pytest command missing performance optimization arguments
+
+Command: pytest tests/
+
+Why this is blocked:
+  - Missing parallel execution (-n auto) wastes CPU resources
+  - Missing coverage tracking (--cov) provides no quality metrics
+  - Sequential execution is significantly slower in CI/CD
+  - No coverage data means quality regressions go unnoticed
+  - Inconsistent with project testing standards
+
+Required Arguments:
+
+  Parallel Execution (pytest-xdist):
+    -n auto                      # Use all available CPU cores
+    -n 4                         # Use specific number of cores
+    --numprocesses=auto          # Long-form alternative
+
+  Coverage Tracking (pytest-cov):
+    --cov=.                      # Track coverage for current directory
+    --cov=src                    # Track coverage for specific directory
+    --cov-report=term            # Add terminal coverage report
+    --cov-report=html            # Generate HTML coverage report
+
+Recommended Command:
+
+  pytest -n auto --cov=. tests/
+  pytest -n auto --cov=. --cov-report=term tests/
+  pytest -n auto --cov=src --cov-report=html tests/
+
+With UV (recommended):
+
+  uv run pytest -n auto --cov=. tests/
+
+Learn more:
+  - pytest-xdist: https://pytest-xdist.readthedocs.io/
+  - pytest-cov: https://pytest-cov.readthedocs.io/
+```
+
+**Missing Parallel Execution Only**:
+```
+🚫 Blocked: Pytest command missing parallel execution argument
+
+Command: pytest --cov=. tests/
+
+Why this is blocked:
+  - Sequential test execution wastes available CPU cores
+  - Significantly slower than parallel execution
+  - CI/CD pipelines take longer than necessary
+  - pytest-xdist is configured but not being utilized
+  - Inconsistent with project performance standards
+
+Add Parallel Execution:
+
+  -n auto                      # Use all available CPU cores (recommended)
+  -n 4                         # Use specific number of cores
+  --numprocesses=auto          # Long-form alternative
+
+Recommended Command:
+
+  pytest -n auto --cov=. tests/
+  uv run pytest -n auto --cov=. tests/
+
+Learn more: https://pytest-xdist.readthedocs.io/
+```
+
+**Missing Coverage Only**:
+```
+🚫 Blocked: Pytest command missing coverage tracking argument
+
+Command: pytest -n auto tests/
+
+Why this is blocked:
+  - No coverage metrics means code quality is unmeasured
+  - Quality regressions and untested code go unnoticed
+  - pytest-cov is configured but not being utilized
+  - Missing valuable feedback on test effectiveness
+  - Inconsistent with project quality standards
+
+Add Coverage Tracking:
+
+  --cov=.                      # Track coverage for current directory
+  --cov=src                    # Track coverage for specific directory
+  --cov-report=term            # Add terminal coverage report
+  --cov-report=html            # Generate HTML coverage report
+  --cov-report=term --cov-report=html  # Multiple report formats
+
+Recommended Command:
+
+  pytest -n auto --cov=. tests/
+  pytest -n auto --cov=. --cov-report=term tests/
+  uv run pytest -n auto --cov=. tests/
+
+Learn more: https://pytest-cov.readthedocs.io/
+```
+
+#### Configuration
+
+The hook is registered in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/lint_arg_pytest.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Disabling the Hook
+
+If you need to temporarily disable this hook:
+
+**Option 1**: Comment out in `.claude/settings.json`
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      // {
+      //   "matcher": "Bash",
+      //   "hooks": [...]
+      // }
+    ]
+  }
+}
+```
+
+**Option 2**: Create `.claude/settings.local.json` (gitignored)
+```json
+{
+  "hooks": {
+    "PreToolUse": []
+  }
+}
+```
+
+**Option 3**: Delete or rename the hook script
+
+#### Testing
+
+Run the comprehensive test suite:
+```bash
+uv run pytest -n auto --cov=. tests/claude_hook/pre_tools/test_lint_arg_pytest.py
+```
+
+Manual testing:
+```bash
+# Test blocked unoptimized command
+echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' | \
+  uv run .claude/hooks/pre_tools/lint_arg_pytest.py
+
+# Test blocked missing xdist
+echo '{"tool_name":"Bash","tool_input":{"command":"pytest --cov=. tests/"}}' | \
+  uv run .claude/hooks/pre_tools/lint_arg_pytest.py
+
+# Test allowed optimized command
+echo '{"tool_name":"Bash","tool_input":{"command":"pytest -n auto --cov=. tests/"}}' | \
+  uv run .claude/hooks/pre_tools/lint_arg_pytest.py
+
+# Test allowed help command
+echo '{"tool_name":"Bash","tool_input":{"command":"pytest --help"}}' | \
+  uv run .claude/hooks/pre_tools/lint_arg_pytest.py
+```
+
+#### Performance
+
+- **Execution Time**: < 50ms per invocation
+- **Memory Usage**: < 5 MB
+- **Dependencies**: Zero external dependencies (Python 3.12+ standard library only)
+- **Coverage**: 89% code coverage with 57 comprehensive tests
+
+#### Security
+
+The hook implements several security measures:
+
+- **Read-Only Operation**: Hook analyzes commands but never executes them
+- **Regex Safety**: Uses simple, bounded patterns to avoid ReDoS attacks
+- **Fail-Safe Behavior**: Allows operations on errors to avoid disrupting development
+- **Input Validation**: Validates all inputs before processing
+- **No Command Execution**: Only parses and validates command strings
+
+#### Command Parsing
+
+The hook intelligently parses complex bash commands:
+
+**Supported Separators**:
+- `&&` - Command chaining
+- `||` - Conditional execution
+- `;` - Sequential commands
+- `|` - Pipes
+
+**Examples**:
+```bash
+# Chained commands
+cd tests && pytest -n auto --cov=. test_module.py
+# ✅ Allowed: pytest command has required args
+
+# Multiple pytest invocations
+pytest -n auto --cov=. tests/unit && pytest -n auto --cov=. tests/integration
+# ✅ Allowed: Both pytest commands are optimized
+
+# Mixed with other commands
+git status && pytest -n auto --cov=. tests/ && echo "Done"
+# ✅ Allowed: pytest command has required args
+```
+
+#### Pytest Detection
+
+The hook detects pytest in various forms:
+
+**Direct Invocation**:
+```bash
+pytest tests/
+pytest --version
+```
+
+**UV-Wrapped**:
+```bash
+uv run pytest tests/
+uv run -m pytest tests/
+```
+
+**Python Module**:
+```bash
+python -m pytest tests/
+python3 -m pytest tests/
+```
+
+#### Known Limitations
+
+The hook cannot detect:
+
+- **Environment Variables**: `PYTEST_ADDOPTS="-n auto --cov=." pytest tests/`
+- **Shell Aliases**: `alias pyt="pytest -n auto --cov=."` then `pyt tests/`
+- **Config Files**: pytest.ini or pyproject.toml configuration
+- **Indirect Execution**: Writing a script with pytest, then executing it
+
+This is **workflow enforcement for interactive commands**, not comprehensive coverage validation. The goal is to catch direct pytest invocations and teach proper command patterns.
+
+#### Philosophy
+
+**Educational Focus**: The hook aims to:
+- ✅ Teach developers to use optimized testing commands
+- ✅ Establish consistent testing practices across the team
+- ✅ Prevent accidental slow test runs in development
+- ✅ Ensure coverage data is always collected
+- ❌ Not designed to catch all possible evasion techniques
+- ❌ Not a replacement for CI/CD pipeline enforcement
+
+**Trade-offs**:
+- **Blocks**: Direct pytest commands without optimization arguments
+- **Allows**: Properly optimized commands, informational queries, non-pytest commands
+- **Fail-Safe**: Allows operations on parsing errors to avoid disrupting development
+
+#### Integration with pytest Configuration
+
+The hook complements pytest configuration files:
+
+**pyproject.toml** (project-level defaults):
+```toml
+[tool.pytest.ini_options]
+addopts = "-n auto --cov=. --cov-report=term"
+testpaths = ["tests"]
+```
+
+**Benefit**: Even with config file, the hook:
+- Provides immediate feedback during command construction
+- Teaches explicit argument usage
+- Prevents accidentally overriding config with plain `pytest`
+
+#### Troubleshooting
+
+**Hook not executing**:
+1. Check hook is registered: `/hooks` command in Claude Code
+2. Verify settings.json is valid JSON
+3. Ensure script is executable: `chmod +x .claude/hooks/pre_tools/lint_arg_pytest.py`
+4. Enable debug mode: `claude --debug`
+
+**Command incorrectly blocked**:
+- Review the error message to understand which argument is missing
+- Verify you're using both `-n auto` (or `-n <num>`) AND `--cov`
+- Check if your command is an informational query (should be allowed)
+- Ensure pytest is actually being invoked (check for `pytest` keyword)
+
+**Command not detected**:
+- The hook uses regex patterns with word boundaries (`\bpytest\b`)
+- Verify the command contains pytest as a distinct word
+- Check if command uses supported separators (&&, ||, ;, |)
+
+#### Related Documentation
+
+- [Specification](../../../specs/experts/cc_hook_expert/pre_tools/lint-arg-pytest-spec.md)
+- [Claude Code Hooks Guide](../../../ai_docs/claude-code-hooks.md)
+- [UV Scripts Guide](../../../ai_docs/uv-scripts-guide.md)
+- [pytest-xdist Documentation](https://pytest-xdist.readthedocs.io/)
+- [pytest-cov Documentation](https://pytest-cov.readthedocs.io/)
+- [Test Suite](../../../tests/claude_hook/pre_tools/test_lint_arg_pytest.py)
+
+---
+
 ## Shared Utilities
 
 All PreToolUse hooks share common utilities from the `utils/` directory:

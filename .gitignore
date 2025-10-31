@@ -219,6 +219,7 @@ __marimo__/
 .mcp.json
 
 agents/*
+specs/*
 
 logs/*
 
