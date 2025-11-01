@@ -24,11 +24,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/uv_dependency_blocker.py"
+            "command": "uv run uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/uv_dependency_blocker.py"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/pep8_naming_enforcer.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/pep8_naming_enforcer.py"
           }
         ]
       },
@@ -37,15 +37,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/destructive_command_blocker.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/destructive_command_blocker.py"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/uv_workflow_enforcer.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/uv_workflow_enforcer.py"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/lint_arg_pytest.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/lint_arg_pytest.py",
             "timeout": 60
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/code_similarity_checking.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/code_similarity_checking.py",
             "timeout": 30
           }
         ]
@@ -65,11 +65,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/tmp_creation_blocker.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/tmp_creation_blocker.py"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/file_naming_enforcer.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/file_naming_enforcer.py"
           }
         ]
       },
@@ -78,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/sensitive_file_access_validator.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/pre_tools/sensitive_file_access_validator.py"
           }
         ]
       },
@@ -87,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/context_bundle_builder.py --type file_ops"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/context_bundle_builder.py --type file_ops"
           }
         ]
       },
@@ -107,27 +107,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/unified_python_antipattern_hook.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/unified_python_antipattern_hook.py",
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/ruff_checking.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/ruff_checking.py",
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/basedpyright_checking.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/basedpyright_checking.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/vulture_checking.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/vulture_checking.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/error_handling_reminder.py",
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/post_tools/error_handling_reminder.py",
             "timeout": 15
           }
         ]
@@ -137,7 +137,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -147,11 +147,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/context_bundle_builder.py --type user_prompt"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/context_bundle_builder.py --type user_prompt"
           },
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -161,7 +161,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -171,7 +171,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -181,7 +181,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -192,7 +192,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -203,7 +203,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
@@ -213,7 +213,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
+            "command": "uv run $CLAUDE_PROJECT_DIR/.claude/hooks/logging/universal_hook_logger.py"
           }
         ]
       }
